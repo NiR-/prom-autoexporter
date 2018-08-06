@@ -4,39 +4,22 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"os"
-	"regexp"
 	"text/template"
 	"time"
 
 	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/api/types/strslice"
 	"github.com/docker/docker/client"
+	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	cli "gopkg.in/urfave/cli.v1"
 )
 
-type Exporter struct {
-	Image    string
-	Cmd      string
-	Exported types.ContainerJSON
-}
-
 type config struct {
-	autoConnect bool
-	network     string
-}
-
-type PredefinedExporter struct {
-	Regexp string
-	Image  string
-	Cmd    string
+	network string
 }
 
 const (
@@ -45,47 +28,8 @@ const (
 	LABEL_EXPORTER_NAME = "autoexporter.exporter"
 )
 
-var (
-	errNodeNotFound = errors.New("node not found")
-
-	predefinedExporters = map[string]PredefinedExporter{
-		"redis": PredefinedExporter{
-			Regexp: "redis",
-			Image:  "oliver006/redis_exporter:v0.20.2",
-			Cmd: `-redis.addr=redis://localhost:6379
-						-redis.alias=api_redis
-						-namespace=api_redis`, //  ,{{.Config.Labels .Data "com.docker.swarm.task.name"}}
-		},
-		"memcached": PredefinedExporter{
-			Regexp: "memcached?",
-			Image:  "quay.io/prometheus/memcached-exporter:v0.4.1",
-			Cmd:    ``,
-		},
-		"fluentd": PredefinedExporter{
-			Regexp: "fluentd?",
-			Image:  "bitnami/fluentd-exporter:0.2.0",
-			Cmd:    ``,
-		},
-		"nginx": PredefinedExporter{
-			Regexp: "nginx",
-			Image:  "sophos/nginx-vts-exporter:v0.10.3",
-			Cmd:    ``,
-		},
-		"blackbox": PredefinedExporter{
-			Regexp: "", // This exporter is never started automatically
-			Image:  "prom/blackbox-exporter:v0.12.0",
-			Cmd:    ``,
-		},
-		"php": PredefinedExporter{
-			Regexp: "php",
-			Image:  "bakins/php-fpm-exporter:v0.4.1",
-			Cmd:    `--fastcgi http://localhost:9000/_status`,
-		},
-	}
-)
-
 func run(cfg config) error {
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithVersion("1.37"))
+	cli, err := client.NewClientWithOpts(client.FromEnv)
 	if err != nil {
 		return err
 	}
@@ -93,26 +37,12 @@ func run(cfg config) error {
 
 	ctx := context.Background()
 
-	hostname, err := os.Hostname()
-	if err != nil {
-		return err
+	if err := cleanup(ctx, cli); err != nil {
+		logrus.Error(err)
 	}
 
-	// @TODO: re-enable
-	/* if err := updateAutoConnectMode(ctx, cli, &cfg, hostname); err != nil {
-		return err
-	} */
-	autoConnectAll(ctx, cli)
-
-	// @TODO: increase duration
-	go every(3*time.Second, func() {
-		if err := updateAutoConnectMode(ctx, cli, &cfg, hostname); err != nil {
-			logrus.Error(err)
-		}
-	})
-
-	if err := cleanup(ctx, cli); err != nil {
-		return err
+	if err := startMissingExporters(ctx, cli, &cfg); err != nil {
+		logrus.Error(err)
 	}
 
 	evtCh, errCh := cli.Events(ctx, types.EventsOptions{
@@ -134,116 +64,6 @@ func run(cfg config) error {
 			}(evt)
 		}
 	}
-
-	return nil
-}
-
-func every(duration time.Duration, fn func()) {
-	for _ = range time.Tick(duration) {
-		fn()
-	}
-}
-
-func updateAutoConnectMode(ctx context.Context, cli *client.Client, cfg *config, hostname string) error {
-	swarmMember, err := isSwarmMember(ctx, cli)
-	if err != nil {
-		return err
-	}
-
-	if !swarmMember {
-		if cfg.autoConnect {
-			cfg.autoConnect = false
-			logrus.Info("Auto connect mode has been disabled because this node is not a member of a swarm cluster.")
-		}
-
-		return nil
-	}
-
-	isLeader, err := isClusterLeader(ctx, cli, hostname)
-	if err != nil {
-		return err
-	}
-
-	if isLeader && !cfg.autoConnect {
-		cfg.autoConnect = true
-		logrus.Info("Auto connect mode has been enabled because this daemon is now running on the cluster leader.")
-
-		go autoConnectAll(ctx, cli)
-	} else if !isLeader && cfg.autoConnect {
-		cfg.autoConnect = false
-		logrus.Info("Auto connect mode has been disabled because this daemon is not running on the cluster leader.")
-	}
-
-	return nil
-}
-
-func isSwarmMember(ctx context.Context, cli *client.Client) (bool, error) {
-	_, err := cli.SwarmInspect(ctx)
-
-	if err != nil &&
-		!client.IsErrConnectionFailed(err) &&
-		!client.IsErrNotImplemented(err) &&
-		!client.IsErrUnauthorized(err) {
-		// If the error is of unknown type, we consider this node as
-		// outside of any swarm cluster
-		return false, nil
-	} else if err != nil {
-		return false, err
-	}
-
-	return true, nil
-}
-
-func isClusterLeader(ctx context.Context, cli *client.Client, hostname string) (bool, error) {
-	nodes, err := cli.NodeList(ctx, types.NodeListOptions{})
-
-	if err != nil &&
-		!client.IsErrConnectionFailed(err) &&
-		!client.IsErrNotImplemented(err) &&
-		!client.IsErrUnauthorized(err) {
-		// If the error is of unknown type, we consider the node as a worker
-		return false, nil
-	} else if err != nil {
-		return false, err
-	}
-
-	for _, node := range nodes {
-		if node.Description.Hostname != hostname {
-			continue
-		}
-
-		if node.ManagerStatus.Leader {
-			return true, nil
-		} else {
-			return false, nil
-		}
-	}
-
-	return false, errNodeNotFound
-}
-
-// @TODO
-func autoConnectAll(ctx context.Context, cli *client.Client) error {
-	services, err := cli.ServiceList(ctx, types.ServiceListOptions{})
-	if err != nil {
-		return err
-	}
-
-	for service := range services {
-		_, ok := service.Spec.TaskTemplate.ContainerSpec.Labels[LABEL_EXPORTER_NAME]
-		if !ok {
-			continue
-		}
-
-		tasks := cli.TaskList(ctx, types.TaskListOptions{
-			Filters: filters.NewArgs(filters.KeyValuePair{
-				Key:   "service",
-				Value: service.Spec.Name,
-			}),
-		})
-	}
-
-	logrus.Infof("Services found: %d", len(services))
 
 	return nil
 }
@@ -271,90 +91,110 @@ func cleanup(ctx context.Context, cli *client.Client) error {
 	return nil
 }
 
-func cleanupExporter(ctx context.Context, cli *client.Client, exporter types.Container) error {
-	_, err := cli.ContainerInspect(ctx, exporter.Labels[LABEL_EXPORTED_NAME])
-
-	// If the exported service is still alive, we stop cleanup process
-	if err == nil {
-		return nil
-	}
-	if !client.IsErrNotFound(err) {
+func startMissingExporters(ctx context.Context, cli *client.Client, cfg *config) error {
+	containers, err := cli.ContainerList(ctx, types.ContainerListOptions{})
+	if err != nil {
 		return err
 	}
 
-	stopExporter(ctx, cli, exporter.Labels[LABEL_EXPORTED_NAME])
+	containerNames := make(map[string]string, 0)
+	for _, container := range containers {
+		for _, name := range container.Names {
+			containerNames[name] = name
+		}
+	}
+
+	for _, container := range containers {
+		// Ignore exporters
+		if _, ok := container.Labels[LABEL_EXPORTED_NAME]; ok {
+			continue
+		}
+
+		exported := container.Labels[LABEL_EXPORTED_NAME]
+		exporter := fmt.Sprintf("%s-exporter", exported)
+		if _, ok := containerNames[exporter]; ok {
+			continue
+		}
+
+		err := handleContainerStart(ctx, cli, container.ID, cfg)
+		if err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
 
 func handleEvent(ctx context.Context, cli *client.Client, evt events.Message, cfg *config) error {
 	if evt.Type == "container" && evt.Action == "start" {
-		return handleContainerStart(ctx, cli, evt, cfg)
+		return handleContainerStart(ctx, cli, evt.Actor.ID, cfg)
 	} else if evt.Type == "container" && evt.Action == "stop" {
-		return handleContainerStop(ctx, cli, evt)
+		return handleContainerStop(ctx, cli, evt.Actor.ID)
 	}
 
 	return nil
 }
 
-func handleContainerStart(ctx context.Context, cli *client.Client, evt events.Message, cfg *config) error {
-	container, err := cli.ContainerInspect(ctx, evt.Actor.ID)
+func handleContainerStart(ctx context.Context, cli *client.Client, containerId string, cfg *config) error {
+	container, err := cli.ContainerInspect(ctx, containerId)
 	if err != nil {
 		return err
 	}
 
-	_, isExporter := container.Config.Labels[LABEL_EXPORTED_ID]
-	if isExporter {
-		return nil
-	}
-
-	exporterName, err := readLabel(container, LABEL_EXPORTER_NAME)
-	if err != nil {
-		return err
-	}
-
-	if exporterName == "" {
-		exporterName = detectExporter(container.Name)
-	}
-
+	exporterName, err := inferExporter(ctx, cli, cfg, container)
 	if exporterName == "" {
 		logrus.WithFields(logrus.Fields{
 			"container.name":   container.Name,
 			"container.labels": container.Config.Labels,
-		}).Infof("No exporter name provided and no matching exporter found.")
+		}).Info("No exporter name provided and no matching exporter found.")
 
-		return nil
+		return err
 	}
 
 	predefinedExporter, ok := predefinedExporters[exporterName]
 	if !ok {
-		logrus.Warningf("Exporter %q not found.", exporterName)
+		return errors.Errorf("Exporter %q not found.", exporterName)
 	}
 
-	cmd, err := tplToStr(predefinedExporter.Cmd, container)
+	exporter, err := NewExporter(predefinedExporter, container)
 	if err != nil {
 		return err
-	}
-
-	exporter := Exporter{
-		Image:    predefinedExporter.Image,
-		Cmd:      cmd,
-		Exported: container,
 	}
 
 	logrus.WithFields(logrus.Fields{
 		"exported.name":  exporter.Exported.Name,
 		"exporter.image": exporter.Image,
 		"exporer.cmd":    exporter.Cmd,
-	}).Infof("Exported container started.")
+	}).Info("Starting exporter...")
 
 	return runExporter(ctx, cli, exporter, cfg)
 }
 
-func readLabel(container types.ContainerJSON, label string) (string, error) {
-	labelVal := container.Config.Labels[label]
+func inferExporter(ctx context.Context, cli *client.Client, cfg *config, container types.ContainerJSON) (string, error) {
+	_, isExporter := container.Config.Labels[LABEL_EXPORTED_ID]
+	if isExporter {
+		return "", nil
+	}
 
-	return tplToStr(labelVal, container)
+	exporterName, err := readLabel(container, LABEL_EXPORTER_NAME)
+	if err != nil {
+		return "", err
+	}
+	if exporterName != "" {
+		return exporterName, nil
+	}
+
+	for name, predefinedExporter := range predefinedExporters {
+		if predefinedExporter.Matcher.Match(container.Name) {
+			return name, nil
+		}
+	}
+
+	return "", nil
+}
+
+func readLabel(container types.ContainerJSON, label string) (string, error) {
+	return tplToStr(container.Config.Labels[label], container)
 }
 
 func tplToStr(tplStr string, values interface{}) (string, error) {
@@ -376,91 +216,8 @@ func tplToStr(tplStr string, values interface{}) (string, error) {
 	return val, nil
 }
 
-func detectExporter(containerName string) string {
-	for exporterName, predefinedExporter := range predefinedExporters {
-		// If a predefined exporter does not have any regexp, it won't be
-		// started automatically
-		if predefinedExporter.Regexp == "" {
-			continue
-		}
-
-		re := regexp.MustCompile(predefinedExporter.Regexp)
-		if re.FindStringIndex(containerName) != nil {
-			return exporterName
-		}
-	}
-
-	return ""
-}
-
-func runExporter(ctx context.Context, cli *client.Client, exporter Exporter, cfg *config) error {
-	config := container.Config{
-		User:  "1000",
-		Cmd:   strslice.StrSlice{exporter.Cmd},
-		Image: exporter.Image,
-		Labels: map[string]string{
-			LABEL_EXPORTED_ID:   exporter.Exported.ID,
-			LABEL_EXPORTED_NAME: exporter.Exported.Name,
-		},
-	}
-	hostConfig := container.HostConfig{
-		NetworkMode: container.NetworkMode(fmt.Sprintf("container:%s", exporter.Exported.ID)),
-		RestartPolicy: container.RestartPolicy{
-			Name:              "on-failure",
-			MaximumRetryCount: 10,
-		},
-	}
-	networkingConfig := network.NetworkingConfig{}
-
-	exporterName := fmt.Sprintf("%s-exporter", exporter.Exported.Name)
-	container, err := cli.ContainerCreate(ctx, &config, &hostConfig, &networkingConfig, exporterName)
-	if err != nil {
-		return err
-	}
-
-	logrus.WithFields(logrus.Fields{
-		"exporter.id":   container.ID,
-		"exported.name": exporter.Exported.Name,
-		"image":         exporter.Image,
-		"cmd":           exporter.Cmd,
-	}).Infof("Exporter container created.", exporter.Exported.Name)
-
-	if len(container.Warnings) > 0 {
-		logrus.WithFields(logrus.Fields{
-			"warnings": container.Warnings,
-		}).Warningf("Docker emitted warnings during container create.")
-	}
-
-	endpointSettings := network.EndpointSettings{}
-	err = cli.NetworkConnect(ctx, cfg.network, exporter.Exported.ID, &endpointSettings)
-	if err != nil {
-		return err
-	}
-
-	logrus.WithFields(logrus.Fields{
-		"exporter.id":   container.ID,
-		"exporter.name": exporter,
-		"exported.name": exporter.Exported.Name,
-		"network":       cfg.network,
-	}).Infof("Exporter connected to prometheus network.", exporter.Exported.Name)
-
-	err = cli.ContainerStart(ctx, container.ID, types.ContainerStartOptions{})
-	if err != nil {
-		return err
-	}
-
-	logrus.WithFields(logrus.Fields{
-		"exporter.id":   container.ID,
-		"exporter.name": exporter,
-		"image":         exporter.Image,
-		"cmd":           exporter.Cmd,
-	}).Infof("Exporter container started.", exporter.Exported.Name)
-
-	return nil
-}
-
-func handleContainerStop(ctx context.Context, cli *client.Client, evt events.Message) error {
-	container, err := cli.ContainerInspect(ctx, evt.Actor.ID)
+func handleContainerStop(ctx context.Context, cli *client.Client, containerId string) error {
+	container, err := cli.ContainerInspect(ctx, containerId)
 	if err != nil {
 		return err
 	}
@@ -471,28 +228,6 @@ func handleContainerStop(ctx context.Context, cli *client.Client, evt events.Mes
 	}
 
 	return stopExporter(ctx, cli, container.Name)
-}
-
-func stopExporter(ctx context.Context, cli *client.Client, exported string) error {
-	exporter := fmt.Sprintf("%s-exporter", exported)
-	err := cli.ContainerStop(ctx, exporter, nil)
-	if err != nil {
-		return err
-	}
-
-	err = cli.ContainerRemove(ctx, exporter, types.ContainerRemoveOptions{
-		Force: true,
-	})
-	if err != nil {
-		return err
-	}
-
-	logrus.WithFields(logrus.Fields{
-		"exporter.name": exporter,
-		"exported.name": exported,
-	}).Infof("Exporter container stopped.", exported)
-
-	return nil
 }
 
 func main() {
@@ -508,21 +243,10 @@ func main() {
 	}
 
 	app.Action = func(c *cli.Context) error {
-		cfg := config{
-			autoConnect: false,
-			network:     c.String("network"),
-		}
-
-		if cfg.network != "" {
-			cfg.autoConnect = true
-		}
-
-		return run(cfg)
+		return run(config{
+			network: c.String("network"),
+		})
 	}
 
-	err := app.Run(os.Args)
-	if err != nil {
-		logrus.Fatal(err)
-		os.Exit(1)
-	}
+	logrus.Fatal(app.Run(os.Args))
 }
