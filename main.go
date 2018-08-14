@@ -14,5 +14,7 @@ func main() {
 	app.Version = "0.2.0"
 	app.Commands = cmd.BuildCommands()
 
-	logrus.Fatal(app.Run(os.Args))
+	if err := app.Run(os.Args); err != nil {
+		logrus.Fatal(err)
+	}
 }

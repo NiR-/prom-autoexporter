@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/NiR-/prom-autoexporter/log"
 	"github.com/NiR-/prom-autoexporter/models"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/events"
@@ -31,14 +32,19 @@ func newCancelCollection() cancelCollection {
 	}
 }
 
-func (c cancelCollection) cancel(k string) {
+func (c cancelCollection) cancel(k string) bool {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	if f, ok := c.funcs[k]; ok {
+	var f func()
+	var ok bool
+
+	if f, ok = c.funcs[k]; ok {
 		f()
 		delete(c.funcs, k)
 	}
+
+	return ok
 }
 
 func (c cancelCollection) add(k string, ctx context.Context) context.Context {
@@ -58,7 +64,7 @@ func (c cancelCollection) remove(k string) {
 	}
 }
 
-func (b Backend) ListenEventsForExported(ctx context.Context, promNetwrk string) {
+func (b Backend) ListenEventsForExported(ctx context.Context, promNetwork string) {
 	evtCh, errCh := b.cli.Events(ctx, types.EventsOptions{
 		Since: time.Now().Format(time.RFC3339),
 		Filters: filters.NewArgs(
@@ -84,23 +90,28 @@ func (b Backend) ListenEventsForExported(ctx context.Context, promNetwrk string)
 				continue
 			}
 
-			logrus.WithFields(logrus.Fields{
-				"event.type":     evt.Type,
-				"event.action":   evt.Action,
-				"event.actor.id": evt.Actor.ID,
-			}).Debug("New container event received.")
+			logger := log.GetLogger(ctx).WithFields(logrus.Fields{
+				"event.type":   evt.Type,
+				"event.action": evt.Action,
+				"exported.cid": evt.Actor.ID,
+			})
+			ctx = log.WithLogger(ctx, logger)
+
+			logger.Debug("New container event received.")
 
 			if evt.Action == "start" {
 				cancellables.add(evt.Actor.ID, ctx)
 			} else if evt.Action == "die" {
-				cancellables.cancel(evt.Actor.ID)
+				if cancelled := cancellables.cancel(evt.Actor.ID); cancelled {
+					logger.Debug("Set up process was running and has been cancelled.")
+				}
 			}
 
 			go func(ctx context.Context, evt events.Message) {
 				handler := func() error {
 					switch evt.Action {
 					case "start":
-						return b.handleContainerStart(ctx, evt.Actor.ID, promNetwrk)
+						return b.handleContainerStart(ctx, evt.Actor.ID, promNetwork)
 					case "die":
 						return b.handleContainerStop(ctx, evt.Actor.ID)
 					default:
@@ -108,8 +119,10 @@ func (b Backend) ListenEventsForExported(ctx context.Context, promNetwrk string)
 					}
 				}
 
+				logger := log.GetLogger(ctx)
+
 				if err := retry(3, 5, handler); err != nil {
-					logrus.Errorf("%+v", err)
+					logger.Errorf("%+v", err)
 				}
 
 				cancellables.remove(evt.Actor.ID)
@@ -133,12 +146,12 @@ func retry(times uint, interval time.Duration, f func() error) error {
 	return err
 }
 
-func (b Backend) handleContainerStart(ctx context.Context, containerId, promNetwrk string) error {
+func (b Backend) handleContainerStart(ctx context.Context, containerId, promNetwork string) error {
+	logger := log.GetLogger(ctx)
 	container, err := b.cli.ContainerInspect(ctx, containerId)
+
 	if client.IsErrNotFound(err) {
-		logrus.WithFields(logrus.Fields{
-			"container.id": containerId,
-		}).Info("Contained died prematurly, exporter won't start.")
+		logger.Info("Contained died prematurly, exporter won't start.")
 		return nil
 	} else if err != nil {
 		return errors.WithStack(err)
@@ -155,30 +168,27 @@ func (b Backend) handleContainerStart(ctx context.Context, containerId, promNetw
 		exporterName = models.FindMatchingExporter(container.Name)
 	}
 
+	logger = logger.WithFields(logrus.Fields{
+		"exported.name": container.Name,
+	})
+	ctx = log.WithLogger(ctx, logger)
+
 	// At this point, if no exporter has been found, we abort start up process
 	if exporterName == "" {
-		logrus.WithFields(logrus.Fields{
-			"container.id":   container.ID,
-			"container.name": container.Name,
-		}).Info("No exporter name provided and no matching exporter found.")
+		logger.Info("No exporter name provided and no matching exporter found.")
 
 		return nil
 	}
 
-	exporter, err := models.FromPredefinedExporter(exporterName, promNetwrk, container)
+	exporter, err := models.FromPredefinedExporter(exporterName, promNetwork, container)
 	if models.IsErrPredefinedExporterNotFound(err) {
-		logrus.WithFields(logrus.Fields{
-			"container.id":   container.ID,
-			"container.name": container.Name,
-		}).Warnf("No predefined exporter named %q found.", exporterName)
+		logger.Warnf("No predefined exporter named %q found.", exporterName)
 		return nil
 	} else if err != nil {
 		return err
 	}
 
-	logrus.WithFields(logrus.Fields{
-		"exported.id":    exporter.Exported.ID,
-		"exported.name":  exporter.Exported.Name,
+	logger.WithFields(logrus.Fields{
 		"exporter.image": exporter.Image,
 	}).Info("Starting exporter...")
 
@@ -219,5 +229,5 @@ func (b Backend) handleContainerStop(ctx context.Context, containerId string) er
 		return nil
 	}
 
-	return b.CleanupExporter(ctx, exporter.ID)
+	return b.CleanupExporter(ctx, exporter.ID, false)
 }

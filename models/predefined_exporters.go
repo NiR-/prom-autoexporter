@@ -1,13 +1,17 @@
 package models
 
 import (
+	"fmt"
 	"regexp"
+
+	"github.com/docker/docker/api/types"
 )
 
 type predefinedExporter struct {
-	matcher exporterMatcher
-	image   string
-	cmd     string
+	matcher      exporterMatcher
+	image        string
+	cmd          []string
+	exporterPort string
 }
 
 type exporterMatcher interface {
@@ -50,21 +54,76 @@ func FindMatchingExporter(name string) string {
 	return ""
 }
 
+type errPredefinedExporterNotFound struct {
+	name string
+}
+
+func (e errPredefinedExporterNotFound) Error() string {
+	return fmt.Sprintf("no predefined exporter named %q found", e.name)
+}
+
+func newErrPredefinedExporterNotFound(exporterName string) error {
+	return errPredefinedExporterNotFound{exporterName}
+}
+
+func IsErrPredefinedExporterNotFound(e error) bool {
+	_, ok := e.(errPredefinedExporterNotFound)
+	return ok
+}
+
+func FromPredefinedExporter(predefinedExporter, promNetwork string, exported types.ContainerJSON) (Exporter, error) {
+	p, ok := predefinedExporters[predefinedExporter]
+	if !ok {
+		return Exporter{}, newErrPredefinedExporterNotFound(predefinedExporter)
+	}
+
+	cmd := make([]string, 0)
+
+	for _, fragment := range p.cmd {
+		val, err := renderTpl(fragment, exported)
+		if err != nil {
+			return Exporter{}, err
+		}
+
+		cmd = append(cmd, val)
+	}
+
+	return NewExporter(predefinedExporter, p.image, cmd, promNetwork, exported), nil
+}
+
+func PredefinedExporterExist(predefinedExporter string) bool {
+	_, ok := predefinedExporters[predefinedExporter]
+	return ok
+}
+
+func GetExporterPort(predefinedExporter string) (string, error) {
+	if _, ok := predefinedExporters[predefinedExporter]; !ok {
+		return "", newErrPredefinedExporterNotFound(predefinedExporter)
+	}
+
+	return predefinedExporters[predefinedExporter].exporterPort, nil
+}
+
 var (
 	predefinedExporters = map[string]predefinedExporter{
 		"redis": predefinedExporter{
 			matcher: newRegexpMatcher("redis"),
 			image:   "oliver006/redis_exporter:v0.20.2",
-			cmd: "redis_exporter " +
-				"-redis.addr=redis://localhost:6379 " +
-				"-redis.alias={{ index .Config.Labels \"com.docker.swarm.service.name\" }} " +
+			cmd: []string{
+				"-redis.addr=redis://localhost:6379",
+				"-redis.alias={{ index .Config.Labels \"com.docker.swarm.service.name\" }}",
 				"-namespace={{ index .Config.Labels \"com.docker.swarm.service.name\" }}",
+			},
+			exporterPort: "9121",
 		},
 		"php": predefinedExporter{
 			matcher: newRegexpMatcher("php"),
 			image:   "bakins/php-fpm-exporter:v0.4.1",
-			cmd: "php-fpm-exporter " +
-				"--fastcgi http://localhost:9000/_status",
+			cmd: []string{
+				"--addr", ":8080",
+				"--fastcgi", "tcp://localhost:9000/_fpm_status",
+			},
+			exporterPort: "8080",
 		},
 		/* "blackbox": predefinedExporter{
 			matcher: newBoolMatcher(false),

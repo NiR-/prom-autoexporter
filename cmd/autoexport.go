@@ -12,10 +12,10 @@ import (
 )
 
 func AutoExport(c *cli.Context) {
-	promNetwrk := c.String("network")
-	ctx := context.Background()
+	promNetwork := c.String("network")
+	forceRecreate := c.Bool("force-recreate")
 
-	ctx = log.WithDefaultLogger(ctx)
+	ctx := log.WithDefaultLogger(context.Background())
 	log.ConfigureDefaultLogger(c.String("level"))
 
 	cli, err := client.NewClientWithOpts(client.FromEnv)
@@ -31,16 +31,22 @@ func AutoExport(c *cli.Context) {
 
 	logrus.Info("Removing stale exporters...")
 
-	if err := b.CleanupStaleExporters(ctx); err != nil {
-		logrus.Errorf("%+v", err)
+	if forceRecreate {
+		if err := b.CleanupAllExporters(ctx); err != nil {
+			logrus.Errorf("%+v", err)
+		}
+	} else {
+		if err := b.CleanupStaleExporters(ctx); err != nil {
+			logrus.Errorf("%+v", err)
+		}
 	}
 
 	logrus.Info("Starting missing exporters...")
 
-	if err := b.StartMissingExporters(ctx, promNetwrk); err != nil {
+	if err := b.StartMissingExporters(ctx, promNetwork); err != nil {
 		logrus.Errorf("%+v", err)
 	}
 
 	logrus.Info("Start listening for new Docker events...")
-	b.ListenEventsForExported(ctx, promNetwrk)
+	b.ListenEventsForExported(ctx, promNetwork)
 }
