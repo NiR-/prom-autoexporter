@@ -1,13 +1,16 @@
-FROM golang:1.10-alpine as builder
+FROM golang:1.11-alpine as builder
 
 ENV SRC_DIR ${GOPATH}/src/github.com/NiR-/prom-autoexporter/
 
-RUN apk add --no-cache ca-certificates git
+RUN apk add --no-cache ca-certificates git && \
+    go get github.com/golang/dep/cmd/dep
 
-COPY . ${SRC_DIR}
-WORKDIR ${SRC_DIR}
+COPY Gopkg.* ${SRC_DIR}/
+WORKDIR ${SRC_DIR}/
 
-RUN go get -d -v
+RUN dep ensure -v -vendor-only
+
+COPY . ${SRC_DIR}/
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /go/bin/prom-autoexporter
 
