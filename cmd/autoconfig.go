@@ -33,21 +33,19 @@ func AutoConfig(c *cli.Context) {
 	cli.NegotiateAPIVersion(ctx)
 
 	b := backend.NewBackend(cli)
-
-	go func() {
+	t := time.NewTicker(interval)
+	handler := func() {
 		if err := reconfigurePrometheus(ctx, b, promNetwork, filepath); err != nil {
 			logrus.Errorf("%+v", err)
 		}
-	}()
+	}
 
-	t := time.NewTicker(interval)
+	go handler()
 
 	for {
 		select {
 		case _ = <-t.C:
-			if err := reconfigurePrometheus(ctx, b, promNetwork, filepath); err != nil {
-				logrus.Errorf("%+v", err)
-			}
+			handler()
 		}
 	}
 }

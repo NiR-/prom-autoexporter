@@ -3,14 +3,19 @@ package models
 import (
 	"fmt"
 	"regexp"
+	"bufio"
+	"bytes"
+	"html/template"
 
 	"github.com/docker/docker/api/types"
+	"github.com/pkg/errors"
 )
 
 type predefinedExporter struct {
 	matcher      exporterMatcher
 	image        string
 	cmd          []string
+	envVars      []string
 	exporterPort string
 }
 
@@ -71,24 +76,57 @@ func IsErrPredefinedExporterNotFound(e error) bool {
 	return ok
 }
 
-func FromPredefinedExporter(predefinedExporter, promNetwork string, exported types.ContainerJSON) (Exporter, error) {
+func FromPredefinedExporter(predefinedExporter string, exported types.ContainerJSON) (Exporter, error) {
 	p, ok := predefinedExporters[predefinedExporter]
 	if !ok {
 		return Exporter{}, newErrPredefinedExporterNotFound(predefinedExporter)
 	}
 
-	cmd := make([]string, 0)
-
-	for _, fragment := range p.cmd {
-		val, err := renderTpl(fragment, exported)
-		if err != nil {
-			return Exporter{}, err
-		}
-
-		cmd = append(cmd, val)
+	cmd, err := renderSliceOfTpls(p.cmd, exported)
+	if err != nil {
+		return Exporter{}, err
 	}
 
-	return NewExporter(predefinedExporter, p.image, cmd, promNetwork, exported), nil
+	envVars, err := renderSliceOfTpls(p.envVars, exported)
+	if err != nil {
+		return Exporter{}, err
+	}
+
+	return NewExporter(predefinedExporter, p.image, cmd, envVars, exported), nil
+}
+
+func renderSliceOfTpls(tpls []string, values interface{}) ([]string, error) {
+	res := make([]string, len(tpls))
+
+	for _, fragment := range tpls {
+		val, err := renderTpl(fragment, values)
+		if err != nil {
+			return []string{}, err
+		}
+
+		res = append(res, val)
+	}
+
+	return res, nil
+}
+
+func renderTpl(tplStr string, values interface{}) (string, error) {
+	tpl, err := template.New("").Parse(tplStr)
+	if err != nil {
+		return "", errors.WithStack(err)
+	}
+
+	var buf bytes.Buffer
+	writer := bufio.NewWriter(&buf)
+	err = tpl.Execute(writer, values)
+	if err != nil {
+		return "", errors.WithStack(err)
+	}
+
+	writer.Flush()
+	val := buf.String()
+
+	return val, nil
 }
 
 func PredefinedExporterExist(predefinedExporter string) bool {
@@ -114,6 +152,7 @@ var (
 				"-redis.alias={{ index .Config.Labels \"com.docker.swarm.service.name\" }}",
 				"-namespace={{ index .Config.Labels \"com.docker.swarm.service.name\" }}",
 			},
+			envVars: []string{},
 			exporterPort: "9121",
 		},
 		"php": predefinedExporter{
@@ -123,6 +162,7 @@ var (
 				"--addr", ":8080",
 				"--fastcgi", "tcp://localhost:9000/_fpm_status",
 			},
+			envVars: []string{},
 			exporterPort: "8080",
 		},
 		"elasticsearch": predefinedExporter{
@@ -132,6 +172,7 @@ var (
 				"-es.uri=http://localhost:9200",
 				"-es.all=false",
 			},
+			envVars: []string{},
 			exporterPort: "9108",
 		},
 		/* "blackbox": predefinedExporter{
@@ -145,12 +186,16 @@ var (
 			cmd:     []string{
 				"-scrape_uri", "http://localhost:24220/api/plugins.json",
 			},
+			envVars: []string{},
 			exporterPort: "9309",
 		},
 		"nginx": predefinedExporter{
 			matcher: newRegexpMatcher("nginx"),
 			image:   "sophos/nginx-vts-exporter:v0.10.3",
 			cmd:     []string{},
+			envVars: []string{
+				"METRICS_NS={{ index .Config.Labels \"com.docker.swarm.service.name\" }}",
+			},
 			exporterPort: "9913",
 		},
 	}

@@ -180,7 +180,7 @@ func (b Backend) handleContainerStart(ctx context.Context, containerId, promNetw
 		return nil
 	}
 
-	exporter, err := models.FromPredefinedExporter(exporterName, promNetwork, container)
+	exporter, err := models.FromPredefinedExporter(exporterName, container)
 	if models.IsErrPredefinedExporterNotFound(err) {
 		logger.Warnf("No predefined exporter named %q found.", exporterName)
 		return nil
@@ -192,6 +192,7 @@ func (b Backend) handleContainerStart(ctx context.Context, containerId, promNetw
 		"exporter.image": exporter.Image,
 	}).Info("Starting exporter...")
 
+	exporter.PromNetwork = promNetwork
 	b.RunExporter(ctx, exporter)
 
 	return nil
