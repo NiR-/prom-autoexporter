@@ -67,7 +67,8 @@ func (b Backend) runStartUpProcess(ctx context.Context, exporter models.Exporter
 	logger := log.GetLogger(ctx).WithFields(logrus.Fields{
 		"step":           ctx.Value("step"),
 		"exported.name":  exporter.Exported.Name,
-		"exporter.type":  exporter.Name,
+		"exporter.type":  exporter.PredefinedType,
+		"exporter.name":  exporter.Name,
 		"exporter.image": exporter.Image,
 	})
 	ctx = log.WithLogger(ctx, logger)
@@ -154,7 +155,7 @@ func (b Backend) createContainer(ctx context.Context, exporter models.Exporter) 
 	}
 	networkingConfig := network.NetworkingConfig{}
 
-	exporterName := fmt.Sprintf("%s-exporter", exporter.Exported.Name)
+	exporterName := exporter.Name
 	container, err := b.cli.ContainerCreate(ctx, &config, &hostConfig, &networkingConfig, exporterName)
 	if err != nil {
 		return exporterName, errors.WithStack(err)
@@ -243,8 +244,7 @@ func (b Backend) StartMissingExporters(ctx context.Context, promNetwork string) 
 			continue
 		}
 
-		exporterName := fmt.Sprintf("%s-exporter", container.Names[0])
-
+		exporterName := getExporterName(container.Names[0])
 		if _, ok := containerNames[exporterName]; ok {
 			continue
 		}
@@ -462,4 +462,8 @@ func (b Backend) GetPromStaticConfigs(ctx context.Context, promNetwork string) (
 	}
 
 	return res, nil
+}
+
+func getExporterName(containerName string) string {
+	return fmt.Sprintf("exporter.%s", strings.TrimLeft(container.Name, "/"))
 }

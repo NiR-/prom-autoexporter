@@ -131,6 +131,7 @@ func (b Backend) ListenEventsForExported(ctx context.Context, promNetwork string
 	}
 }
 
+// @TODO: implement true back-off retry
 func retry(times uint, interval time.Duration, f func() error) error {
 	err := f()
 
@@ -158,14 +159,14 @@ func (b Backend) handleContainerStart(ctx context.Context, containerId, promNetw
 	}
 
 	// We first check if an exporter name has been explicitly provided
-	exporterName, err := readLabel(container, LABEL_EXPORTER_NAME)
+	exporterType, err := readLabel(container, LABEL_EXPORTER_NAME)
 	if err != nil {
 		return err
 	}
 
 	// Then we try to find a predefined exporter matching container metadata
-	if exporterName == "" {
-		exporterName = models.FindMatchingExporter(container.Name)
+	if exporterType == "" {
+		exporterType = models.FindMatchingExporter(container.Name)
 	}
 
 	logger = logger.WithFields(logrus.Fields{
@@ -174,15 +175,16 @@ func (b Backend) handleContainerStart(ctx context.Context, containerId, promNetw
 	ctx = log.WithLogger(ctx, logger)
 
 	// At this point, if no exporter has been found, we abort start up process
-	if exporterName == "" {
+	if exporterType == "" {
 		logger.Info("No exporter name provided and no matching exporter found.")
 
 		return nil
 	}
 
-	exporter, err := models.FromPredefinedExporter(exporterName, container)
+	exporterName := getExporterName(container.Name)
+	exporter, err := models.FromPredefinedExporter(exporterName, exporterType, container)
 	if models.IsErrPredefinedExporterNotFound(err) {
-		logger.Warnf("No predefined exporter named %q found.", exporterName)
+		logger.Warnf("No predefined exporter named %q found.", exporterType)
 		return nil
 	} else if err != nil {
 		return err
