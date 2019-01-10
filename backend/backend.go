@@ -42,6 +42,15 @@ func NewBackend(cli *client.Client) Backend {
 
 func (b Backend) RunExporter(ctx context.Context, exporter models.Exporter) {
 	var err error
+
+	logger := log.GetLogger(ctx).WithFields(logrus.Fields{
+		"exported.name":  exporter.Exported.Name,
+		"exporter.type":  exporter.PredefinedType,
+		"exporter.name":  exporter.Name,
+		"exporter.image": exporter.Image,
+	})
+
+	ctx = log.WithLogger(ctx, logger)
 	ctx = context.WithValue(ctx, "step", stepPullImage)
 
 	for {
@@ -49,63 +58,59 @@ func (b Backend) RunExporter(ctx context.Context, exporter models.Exporter) {
 		case <-ctx.Done():
 			return
 		default:
-			if ctx, err = b.runStartUpProcess(ctx, exporter); err != nil {
-				logger := log.GetLogger(ctx)
-				logger.Errorf("%+v", err)
+			step := ctx.Value("step")
 
+			logger := log.GetLogger(ctx).WithFields(logrus.Fields{"step": step})
+			ctx = log.WithLogger(ctx, logger)
+
+			// The startup process is decomposed into several steps executed serially,
+			// in order to cancel the startup as soon as possible
+			switch step {
+			case stepPullImage:
+				ctx, err = b.execPullImageStep(ctx, exporter)
+			case stepCreate:
+				ctx, err = b.execCreateStep(ctx, exporter)
+			case stepConnect:
+				ctx, err = b.execConnectStep(ctx, exporter)
+			case stepStart:
+				ctx, err = b.execStartStep(ctx, exporter)
+			case stepFinished:
 				return
+			default:
+				err = errors.New(fmt.Sprintf("undefined step %s", step))
 			}
 
-			if ctx.Value("step") == stepFinished {
+			if err != nil {
+				logger.Errorf("%+v", err)
 				return
 			}
 		}
 	}
 }
 
-func (b Backend) runStartUpProcess(ctx context.Context, exporter models.Exporter) (context.Context, error) {
-	logger := log.GetLogger(ctx).WithFields(logrus.Fields{
-		"step":           ctx.Value("step"),
-		"exported.name":  exporter.Exported.Name,
-		"exporter.type":  exporter.PredefinedType,
-		"exporter.name":  exporter.Name,
-		"exporter.image": exporter.Image,
-	})
-	ctx = log.WithLogger(ctx, logger)
-
-	if ctx.Value("step") == stepPullImage {
-		err := b.pullImage(ctx, exporter.Image)
-		if err != nil {
-			return ctx, err
-		}
-
-		ctx = context.WithValue(ctx, "step", stepCreate)
-	} else if ctx.Value("step") == stepCreate {
-		cid, err := b.createContainer(ctx, exporter)
-		if err != nil && isErrConflict(err) {
-			logger.Warningf("Non-fatal error happened when creating exporter container")
-		} else if err != nil {
-			return ctx, err
-		}
-
-		ctx = context.WithValue(ctx, "exporter.id", cid)
-		ctx = context.WithValue(ctx, "step", stepConnect)
-		ctx = log.WithLogger(ctx, logger.WithFields(logrus.Fields{"exporter.cid": cid}))
-	} else if ctx.Value("step") == stepConnect {
-		err := b.connectToNetwork(ctx, exporter, ctx.Value("exporter.id").(string))
-		if err != nil {
-			return ctx, err
-		}
-
-		ctx = context.WithValue(ctx, "step", stepStart)
-	} else if ctx.Value("step") == stepStart {
-		err := b.startContainer(ctx, exporter, ctx.Value("exporter.id").(string))
-		if err != nil {
-			return ctx, err
-		}
-
-		ctx = context.WithValue(ctx, "step", stepFinished)
+func (b Backend) execPullImageStep(ctx context.Context, exporter models.Exporter) (context.Context, error) {
+	if err := b.pullImage(ctx, exporter.Image); err != nil {
+		return ctx, err
 	}
+
+	ctx = context.WithValue(ctx, "step", stepCreate)
+
+	return ctx, nil
+}
+
+func (b Backend) execCreateStep(ctx context.Context, exporter models.Exporter) (context.Context, error) {
+	logger := log.GetLogger(ctx)
+
+	cid, err := b.createContainer(ctx, exporter)
+	if err != nil && isErrConflict(err) {
+		logger.Warningf("Non-fatal error happened when creating exporter container")
+	} else if err != nil {
+		return ctx, err
+	}
+
+	ctx = context.WithValue(ctx, "exporter.cid", cid)
+	ctx = context.WithValue(ctx, "step", stepConnect)
+	ctx = log.WithLogger(ctx, logger.WithFields(logrus.Fields{"exporter.cid": cid}))
 
 	return ctx, nil
 }
@@ -119,6 +124,28 @@ func isErrConflict(err error) bool {
 	return ok
 }
 
+func (b Backend) execConnectStep(ctx context.Context, exporter models.Exporter) (context.Context, error) {
+	err := b.connectToNetwork(ctx, exporter, ctx.Value("exporter.cid").(string))
+	if err != nil {
+		return ctx, err
+	}
+
+	ctx = context.WithValue(ctx, "step", stepStart)
+
+	return ctx, nil
+}
+
+func (b Backend) execStartStep(ctx context.Context, exporter models.Exporter) (context.Context, error) {
+	err := b.startContainer(ctx, exporter, ctx.Value("exporter.cid").(string))
+	if err != nil {
+		return ctx, err
+	}
+
+	ctx = context.WithValue(ctx, "step", stepFinished)
+
+	return ctx, nil
+}
+
 func (b Backend) pullImage(ctx context.Context, image string) error {
 	logger := log.GetLogger(ctx)
 	logger.Debugf("Pulling image %q", image)
@@ -128,6 +155,7 @@ func (b Backend) pullImage(ctx context.Context, image string) error {
 		return errors.WithStack(err)
 	}
 
+	// Wait until image pulling ends (= when rc is closed)
 	if _, err := ioutil.ReadAll(rc); err != nil {
 		return errors.WithStack(err)
 	}
@@ -155,10 +183,9 @@ func (b Backend) createContainer(ctx context.Context, exporter models.Exporter) 
 	}
 	networkingConfig := network.NetworkingConfig{}
 
-	exporterName := exporter.Name
-	container, err := b.cli.ContainerCreate(ctx, &config, &hostConfig, &networkingConfig, exporterName)
+	container, err := b.cli.ContainerCreate(ctx, &config, &hostConfig, &networkingConfig, exporter.Name)
 	if err != nil {
-		return exporterName, errors.WithStack(err)
+		return exporter.Name, errors.WithStack(err)
 	}
 
 	logger := log.GetLogger(ctx)
@@ -170,7 +197,7 @@ func (b Backend) createContainer(ctx context.Context, exporter models.Exporter) 
 		}).Warning("Docker emitted warnings during container create.")
 	}
 
-	return exporterName, nil
+	return exporter.Name, nil
 }
 
 func (b Backend) connectToNetwork(ctx context.Context, exporter models.Exporter, cid string) error {
@@ -215,10 +242,7 @@ func (b Backend) StopExporter(ctx context.Context, exporter types.ContainerJSON)
 	}
 
 	logger := log.GetLogger(ctx)
-	logger.WithFields(logrus.Fields{
-		"exported.id":   exporter.Config.Labels[LABEL_EXPORTED_ID],
-		"exported.name": exporter.Config.Labels[LABEL_EXPORTED_NAME],
-	}).Info("Exporter container stopped.")
+	logger.Info("Exporter container stopped.")
 
 	return nil
 }
@@ -237,7 +261,7 @@ func (b Backend) StartMissingExporters(ctx context.Context, promNetwork string) 
 	}
 
 	// Iterate over containers to find which one should have an associated
-	// exporter running but does not have one
+	// exporter running but does not
 	for _, container := range containers {
 		// Ignore exporters
 		if _, ok := container.Labels[LABEL_EXPORTED_NAME]; ok {
@@ -280,10 +304,11 @@ func (b Backend) CleanupStaleExporters(ctx context.Context) error {
 	logger.Debugf("Found %d running exporters.", len(exporters))
 
 	for _, container := range exporters {
-		ctx := log.WithLogger(ctx, logger.WithFields(logrus.Fields{
+		logger = logger.WithFields(logrus.Fields{
 			"exporter.cid":  container.ID,
 			"exporter.name": container.Names[0],
-		}))
+		})
+		ctx := log.WithLogger(ctx, logger)
 
 		err := b.CleanupExporter(ctx, container.ID, false)
 		if err != nil && !IsErrExportedStillRunning(err) {
@@ -307,7 +332,7 @@ func (b Backend) CleanupAllExporters(ctx context.Context) error {
 	}
 
 	logger := log.GetLogger(ctx)
-	logger.Debugf("Found %d exporters.", len(exporters))
+	logger.Debugf("Found %d exporters to clean up...", len(exporters))
 
 	for _, container := range exporters {
 		logger := logger.WithFields(logrus.Fields{
@@ -331,13 +356,20 @@ func (b Backend) CleanupExporter(ctx context.Context, cid string, force bool) er
 		return errors.WithStack(err)
 	}
 
-	// If the exported container is still alive and force is false, cleanup process is aborted
-	exported, err := b.cli.ContainerInspect(ctx, exporter.Config.Labels[LABEL_EXPORTED_ID])
+	exportedTaskId := exporter.Config.Labels[LABEL_EXPORTED_ID]
+	exported, err := b.cli.ContainerInspect(ctx, exportedTaskId)
+
 	if err != nil && !client.IsErrNotFound(err) {
 		return errors.WithStack(err)
 	} else if err == nil && exported.State.Running && !force {
-		return newErrExportedStillRunning(cid, exporter.Config.Labels[LABEL_EXPORTED_ID])
+		return newErrExportedTaskStillRunning(cid, exportedTaskId)
 	}
+
+	logger := log.GetLogger().WithFields(logrus.Fields{
+		"exported.id":   exportedTaskId,
+		"exported.name": exporter.Config.Labels[LABEL_EXPORTED_NAME],
+	})
+	ctx := log.WithLogger(ctx, logger)
 
 	return b.StopExporter(ctx, exporter)
 }

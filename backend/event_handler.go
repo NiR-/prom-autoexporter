@@ -176,7 +176,7 @@ func (b Backend) handleContainerStart(ctx context.Context, containerId, promNetw
 
 	// At this point, if no exporter has been found, we abort start up process
 	if exporterType == "" {
-		logger.Info("No exporter name provided and no matching exporter found.")
+		logger.Debug("No exporter name provided and no matching exporter found.")
 
 		return nil
 	}
