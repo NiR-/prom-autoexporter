@@ -1,19 +1,38 @@
 package models
 
-// This struct matches the structure defined for the static_config config format
-// defined by Prometheus, see: https://prometheus.io/docs/prometheus/latest/configuration/configuration/#static_config
+import (
+	"encoding/json"
+)
+
+// The StaticConfig holds a set of targets with their associated labels
 type StaticConfig struct {
-	Targets []string          `json:"targets"`
-	Labels  map[string]string `json:"labels"`
+	Targets map[string]map[string]string
 }
 
 func NewStaticConfig() *StaticConfig {
 	return &StaticConfig{
-		Targets: make([]string, 0),
-		Labels:  make(map[string]string),
+		Targets: make(map[string]map[string]string),
 	}
 }
 
-func (c *StaticConfig) AddTarget(target string) {
-	c.Targets = append(c.Targets, target)
+func (c *StaticConfig) AddTarget(target string, labels map[string]string) {
+	c.Targets[target] = labels
+}
+
+func (c *StaticConfig) ToJSON() ([]byte, error) {
+	config := make([]map[string]interface{}, 0)
+
+	for target, labels := range c.Targets {
+		config = append(config, map[string]interface{}{
+			"targets": []string{target},
+			"labels": labels,
+		})
+	}
+
+	content, err := json.Marshal(config)
+	if err != nil {
+		return []byte{}, err
+	}
+
+	return content, nil
 }

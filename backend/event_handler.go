@@ -20,19 +20,19 @@ import (
 )
 
 // Thread-safe collection of context.CancelFunc
-type cancelCollection struct {
+type cancellableCollection struct {
 	mutex sync.RWMutex
 	funcs map[string]context.CancelFunc
 }
 
-func newCancelCollection() cancelCollection {
-	return cancelCollection{
+func newCancellableCollection() cancellableCollection {
+	return cancellableCollection{
 		mutex: sync.RWMutex{},
 		funcs: make(map[string]context.CancelFunc, 0),
 	}
 }
 
-func (c cancelCollection) cancel(k string) bool {
+func (c cancellableCollection) cancel(k string) bool {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -47,7 +47,7 @@ func (c cancelCollection) cancel(k string) bool {
 	return ok
 }
 
-func (c cancelCollection) add(k string, ctx context.Context) context.Context {
+func (c cancellableCollection) add(k string, ctx context.Context) context.Context {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -55,7 +55,7 @@ func (c cancelCollection) add(k string, ctx context.Context) context.Context {
 	return ctx
 }
 
-func (c cancelCollection) remove(k string) {
+func (c cancellableCollection) remove(k string) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -73,7 +73,7 @@ func (b Backend) ListenEventsForExported(ctx context.Context, promNetwork string
 		),
 	})
 
-	cancellables := newCancelCollection()
+	cancellables := newCancellableCollection()
 
 	for {
 		select {
@@ -152,7 +152,7 @@ func (b Backend) handleContainerStart(ctx context.Context, containerId, promNetw
 	container, err := b.cli.ContainerInspect(ctx, containerId)
 
 	if client.IsErrNotFound(err) {
-		logger.Info("Contained died prematurly, exporter won't start.")
+		logger.Info("Container died prematurly, exporter won't start.")
 		return nil
 	} else if err != nil {
 		return errors.WithStack(err)
@@ -232,5 +232,5 @@ func (b Backend) handleContainerStop(ctx context.Context, containerId string) er
 		return nil
 	}
 
-	return b.CleanupExporter(ctx, exporter.ID, false)
+	return b.CleanupExporter(ctx, exporter.ID, true)
 }
