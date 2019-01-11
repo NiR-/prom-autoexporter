@@ -136,9 +136,10 @@ func (b Backend) pullImage(ctx context.Context, image string) error {
 
 func (b Backend) createContainer(ctx context.Context, exporter models.Exporter) (string, error) {
 	config := container.Config{
-		User:  "1000",
-		Cmd:   exporter.Cmd,
-		Image: exporter.Image,
+		User:   "1000",
+		Cmd:    exporter.Cmd,
+		Image:  exporter.Image,
+		Env:    exporter.EnvVars,
 		Labels: map[string]string{
 			LABEL_EXPORTED_ID:   exporter.Exported.ID,
 			LABEL_EXPORTED_NAME: exporter.Exported.Name,
