@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net"
-	"regexp"
 	"strings"
 	"strconv"
 
@@ -41,7 +40,7 @@ func NewBackend(cli *client.Client) Backend {
 	return Backend{cli}
 }
 
-type process {
+type process struct {
 	exporter    models.Exporter
 	step        string
 	exporterCID string
@@ -59,7 +58,7 @@ func (b Backend) RunExporter(ctx context.Context, exporter models.Exporter) {
 
 	ctx = log.WithLogger(ctx, logger)
 
-	p := process{exporter, stepPullImage}
+	p := process{exporter, stepPullImage, ""}
 
 	for {
 		select {
@@ -67,7 +66,7 @@ func (b Backend) RunExporter(ctx context.Context, exporter models.Exporter) {
 			return
 		default:
 			logFields := logrus.Fields{"step": p.step}
-			if p.exporterCID != nil {
+			if p.exporterCID != "" {
 				logFields["exporter.cid"] = p.exporterCID
 			}
 
