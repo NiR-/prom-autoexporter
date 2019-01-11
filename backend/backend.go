@@ -41,6 +41,12 @@ func NewBackend(cli *client.Client) Backend {
 	return Backend{cli}
 }
 
+type process {
+	exporter    models.Exporter
+	step        string
+	exporterCID string
+}
+
 func (b Backend) RunExporter(ctx context.Context, exporter models.Exporter) {
 	var err error
 
@@ -52,33 +58,46 @@ func (b Backend) RunExporter(ctx context.Context, exporter models.Exporter) {
 	})
 
 	ctx = log.WithLogger(ctx, logger)
-	ctx = context.WithValue(ctx, "step", stepPullImage)
+
+	p := process{exporter, stepPullImage}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
-			step := ctx.Value("step")
+			logFields := logrus.Fields{"step": p.step}
+			if p.exporterCID != nil {
+				logFields["exporter.cid"] = p.exporterCID
+			}
 
-			logger := log.GetLogger(ctx).WithFields(logrus.Fields{"step": step})
+			logger = logger.WithFields(logFields)
 			ctx = log.WithLogger(ctx, logger)
 
 			// The startup process is decomposed into several steps executed serially,
 			// in order to cancel the startup as soon as possible
-			switch step {
+			switch p.step {
 			case stepPullImage:
-				ctx, err = b.execPullImageStep(ctx, exporter)
+				err = b.pullImage(ctx, exporter.Image)
+				p.step = stepCreate
 			case stepCreate:
-				ctx, err = b.execCreateStep(ctx, exporter)
+				cid, err := b.createContainer(ctx, p.exporter)
+
+				if err == nil {
+					p.exporterCID = cid
+				}
+
+				p.step = stepConnect
 			case stepConnect:
-				ctx, err = b.execConnectStep(ctx, exporter)
+				err = b.connectToNetwork(ctx, p.exporter, p.exporterCID)
+				p.step = stepStart
 			case stepStart:
-				ctx, err = b.execStartStep(ctx, exporter)
+				err = b.startContainer(ctx, p.exporter, p.exporterCID)
+				p.step = stepFinished
 			case stepFinished:
 				return
 			default:
-				err = errors.New(fmt.Sprintf("undefined step %s", step))
+				err = errors.New(fmt.Sprintf("undefined step %s", p.step))
 			}
 
 			if err != nil {
@@ -87,64 +106,6 @@ func (b Backend) RunExporter(ctx context.Context, exporter models.Exporter) {
 			}
 		}
 	}
-}
-
-func (b Backend) execPullImageStep(ctx context.Context, exporter models.Exporter) (context.Context, error) {
-	if err := b.pullImage(ctx, exporter.Image); err != nil {
-		return ctx, err
-	}
-
-	ctx = context.WithValue(ctx, "step", stepCreate)
-
-	return ctx, nil
-}
-
-func (b Backend) execCreateStep(ctx context.Context, exporter models.Exporter) (context.Context, error) {
-	logger := log.GetLogger(ctx)
-
-	cid, err := b.createContainer(ctx, exporter)
-	if err != nil && isErrConflict(err) {
-		logger.Warningf("Non-fatal error happened when creating exporter container")
-	} else if err != nil {
-		return ctx, err
-	}
-
-	ctx = context.WithValue(ctx, "exporter.cid", cid)
-	ctx = context.WithValue(ctx, "step", stepConnect)
-	ctx = log.WithLogger(ctx, logger.WithFields(logrus.Fields{"exporter.cid": cid}))
-
-	return ctx, nil
-}
-
-func isErrConflict(err error) bool {
-	ok, err := regexp.MatchString("The container name \"[^\"]+\" is already in use", err.Error())
-	if err != nil {
-		panic(err)
-	}
-
-	return ok
-}
-
-func (b Backend) execConnectStep(ctx context.Context, exporter models.Exporter) (context.Context, error) {
-	err := b.connectToNetwork(ctx, exporter, ctx.Value("exporter.cid").(string))
-	if err != nil {
-		return ctx, err
-	}
-
-	ctx = context.WithValue(ctx, "step", stepStart)
-
-	return ctx, nil
-}
-
-func (b Backend) execStartStep(ctx context.Context, exporter models.Exporter) (context.Context, error) {
-	err := b.startContainer(ctx, exporter, ctx.Value("exporter.cid").(string))
-	if err != nil {
-		return ctx, err
-	}
-
-	ctx = context.WithValue(ctx, "step", stepFinished)
-
-	return ctx, nil
 }
 
 func (b Backend) pullImage(ctx context.Context, image string) error {

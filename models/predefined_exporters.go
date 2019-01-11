@@ -95,6 +95,9 @@ func FromPredefinedExporter(name, predefinedExporter string, exported types.Cont
 	return NewExporter(name, predefinedExporter, p.image, cmd, envVars, exported), nil
 }
 
+// This function will render multiple templates with the same set of values each time
+// This is used when creating an exporter from a predefined exporter, to render EnvVars
+// and Commands templates
 func renderSliceOfTpls(tpls []string, values interface{}) ([]string, error) {
 	res := []string{}
 
