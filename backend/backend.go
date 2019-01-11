@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"regexp"
 	"strings"
@@ -24,10 +25,11 @@ const (
 	LABEL_EXPORTED_NAME = "autoexporter.exported.name"
 	LABEL_EXPORTER_NAME = "autoexporter.exporter"
 
-	stepCreate   = "create"
-	stepConnect  = "connect"
-	stepStart    = "start"
-	stepFinished = "finished"
+	stepPullImage = "pullImage"
+	stepCreate    = "create"
+	stepConnect   = "connect"
+	stepStart     = "start"
+	stepFinished  = "finished"
 )
 
 type Backend struct {
@@ -40,7 +42,7 @@ func NewBackend(cli *client.Client) Backend {
 
 func (b Backend) RunExporter(ctx context.Context, exporter models.Exporter) {
 	var err error
-	ctx = context.WithValue(ctx, "step", stepCreate)
+	ctx = context.WithValue(ctx, "step", stepPullImage)
 
 	for {
 		select {
@@ -70,7 +72,14 @@ func (b Backend) runStartUpProcess(ctx context.Context, exporter models.Exporter
 	})
 	ctx = log.WithLogger(ctx, logger)
 
-	if ctx.Value("step") == stepCreate {
+	if ctx.Value("step") == stepPullImage {
+		err := b.pullImage(ctx, exporter.Image)
+		if err != nil {
+			return ctx, err
+		}
+
+		ctx = context.WithValue(ctx, "step", stepCreate)
+	} else if ctx.Value("step") == stepCreate {
 		cid, err := b.createContainer(ctx, exporter)
 		if err != nil && isErrConflict(err) {
 			logger.Warningf("Non-fatal error happened when creating exporter container")
@@ -107,6 +116,22 @@ func isErrConflict(err error) bool {
 	}
 
 	return ok
+}
+
+func (b Backend) pullImage(ctx context.Context, image string) error {
+	logger := log.GetLogger(ctx)
+	logger.Debugf("Pulling image %q", image)
+
+	rc, err := b.cli.ImagePull(ctx, image, types.ImagePullOptions{})
+	if err != nil {
+		return errors.WithStack(err)
+	}
+
+	if _, err := ioutil.ReadAll(rc); err != nil {
+		return errors.WithStack(err)
+	}
+
+	return nil
 }
 
 func (b Backend) createContainer(ctx context.Context, exporter models.Exporter) (string, error) {
