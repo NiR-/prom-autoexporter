@@ -7,7 +7,7 @@ type errExportedStilRunning struct {
 	exportedID string
 }
 
-func newErrExportedStillRunning(exporterID, exportedID string) errExportedStilRunning {
+func newErrExportedTaskStillRunning(exporterID, exportedID string) errExportedStilRunning {
 	return errExportedStilRunning{exporterID, exportedID}
 }
 

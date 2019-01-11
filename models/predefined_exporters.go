@@ -76,7 +76,7 @@ func IsErrPredefinedExporterNotFound(e error) bool {
 	return ok
 }
 
-func FromPredefinedExporter(predefinedExporter string, exported types.ContainerJSON) (Exporter, error) {
+func FromPredefinedExporter(name, predefinedExporter string, exported types.ContainerJSON) (Exporter, error) {
 	p, ok := predefinedExporters[predefinedExporter]
 	if !ok {
 		return Exporter{}, newErrPredefinedExporterNotFound(predefinedExporter)
@@ -92,11 +92,14 @@ func FromPredefinedExporter(predefinedExporter string, exported types.ContainerJ
 		return Exporter{}, err
 	}
 
-	return NewExporter(predefinedExporter, p.image, cmd, envVars, exported), nil
+	return NewExporter(name, predefinedExporter, p.image, cmd, envVars, exported), nil
 }
 
+// This function will render multiple templates with the same set of values each time
+// This is used when creating an exporter from a predefined exporter, to render EnvVars
+// and Commands templates
 func renderSliceOfTpls(tpls []string, values interface{}) ([]string, error) {
-	res := make([]string, len(tpls))
+	res := []string{}
 
 	for _, fragment := range tpls {
 		val, err := renderTpl(fragment, values)
@@ -175,11 +178,6 @@ var (
 			envVars: []string{},
 			exporterPort: "9108",
 		},
-		/* "blackbox": predefinedExporter{
-			matcher: newBoolMatcher(false),
-			image:   "prom/blackbox-exporter:v0.13.0",
-			cmd:     []string{},
-		}, */
 		"fluentd": predefinedExporter{
 			matcher: newRegexpMatcher("fluentd?"),
 			image:   "bitnami/fluentd-exporter:0.2.0",
@@ -191,12 +189,17 @@ var (
 		},
 		"nginx": predefinedExporter{
 			matcher: newRegexpMatcher("nginx"),
-			image:   "sophos/nginx-vts-exporter:v0.10.3",
-			cmd:     []string{},
-			envVars: []string{
-				"METRICS_NS={{ index .Config.Labels \"com.docker.swarm.service.name\" }}",
+			image:   "nginx/nginx-prometheus-exporter:0.2.0",
+			cmd:     []string{
+				"-nginx.scrape-uri", "http://localhost/_status",
 			},
-			exporterPort: "9913",
+			envVars: []string{},
+			exporterPort: "9113",
 		},
+		/* "blackbox": predefinedExporter{
+			matcher: newBoolMatcher(false),
+			image:   "prom/blackbox-exporter:v0.13.0",
+			cmd:     []string{},
+		}, */
 	}
 )

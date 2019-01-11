@@ -7,6 +7,7 @@ import (
 	"net"
 	"regexp"
 	"strings"
+	"strconv"
 
 	"github.com/NiR-/prom-autoexporter/log"
 	"github.com/NiR-/prom-autoexporter/models"
@@ -40,82 +41,71 @@ func NewBackend(cli *client.Client) Backend {
 	return Backend{cli}
 }
 
+type process {
+	exporter    models.Exporter
+	step        string
+	exporterCID string
+}
+
 func (b Backend) RunExporter(ctx context.Context, exporter models.Exporter) {
 	var err error
-	ctx = context.WithValue(ctx, "step", stepPullImage)
+
+	logger := log.GetLogger(ctx).WithFields(logrus.Fields{
+		"exported.name":  exporter.Exported.Name,
+		"exporter.type":  exporter.PredefinedType,
+		"exporter.name":  exporter.Name,
+		"exporter.image": exporter.Image,
+	})
+
+	ctx = log.WithLogger(ctx, logger)
+
+	p := process{exporter, stepPullImage}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
-			if ctx, err = b.runStartUpProcess(ctx, exporter); err != nil {
-				logger := log.GetLogger(ctx)
+			logFields := logrus.Fields{"step": p.step}
+			if p.exporterCID != nil {
+				logFields["exporter.cid"] = p.exporterCID
+			}
+
+			logger = logger.WithFields(logFields)
+			ctx = log.WithLogger(ctx, logger)
+
+			// The startup process is decomposed into several steps executed serially,
+			// in order to cancel the startup as soon as possible
+			switch p.step {
+			case stepPullImage:
+				err = b.pullImage(ctx, exporter.Image)
+				p.step = stepCreate
+			case stepCreate:
+				cid, err := b.createContainer(ctx, p.exporter)
+
+				if err == nil {
+					p.exporterCID = cid
+				}
+
+				p.step = stepConnect
+			case stepConnect:
+				err = b.connectToNetwork(ctx, p.exporter, p.exporterCID)
+				p.step = stepStart
+			case stepStart:
+				err = b.startContainer(ctx, p.exporter, p.exporterCID)
+				p.step = stepFinished
+			case stepFinished:
+				return
+			default:
+				err = errors.New(fmt.Sprintf("undefined step %s", p.step))
+			}
+
+			if err != nil {
 				logger.Errorf("%+v", err)
-
-				return
-			}
-
-			if ctx.Value("step") == stepFinished {
 				return
 			}
 		}
 	}
-}
-
-func (b Backend) runStartUpProcess(ctx context.Context, exporter models.Exporter) (context.Context, error) {
-	logger := log.GetLogger(ctx).WithFields(logrus.Fields{
-		"step":           ctx.Value("step"),
-		"exported.name":  exporter.Exported.Name,
-		"exporter.type":  exporter.Name,
-		"exporter.image": exporter.Image,
-	})
-	ctx = log.WithLogger(ctx, logger)
-
-	if ctx.Value("step") == stepPullImage {
-		err := b.pullImage(ctx, exporter.Image)
-		if err != nil {
-			return ctx, err
-		}
-
-		ctx = context.WithValue(ctx, "step", stepCreate)
-	} else if ctx.Value("step") == stepCreate {
-		cid, err := b.createContainer(ctx, exporter)
-		if err != nil && isErrConflict(err) {
-			logger.Warningf("Non-fatal error happened when creating exporter container")
-		} else if err != nil {
-			return ctx, err
-		}
-
-		ctx = context.WithValue(ctx, "exporter.id", cid)
-		ctx = context.WithValue(ctx, "step", stepConnect)
-		ctx = log.WithLogger(ctx, logger.WithFields(logrus.Fields{"exporter.cid": cid}))
-	} else if ctx.Value("step") == stepConnect {
-		err := b.connectToNetwork(ctx, exporter, ctx.Value("exporter.id").(string))
-		if err != nil {
-			return ctx, err
-		}
-
-		ctx = context.WithValue(ctx, "step", stepStart)
-	} else if ctx.Value("step") == stepStart {
-		err := b.startContainer(ctx, exporter, ctx.Value("exporter.id").(string))
-		if err != nil {
-			return ctx, err
-		}
-
-		ctx = context.WithValue(ctx, "step", stepFinished)
-	}
-
-	return ctx, nil
-}
-
-func isErrConflict(err error) bool {
-	ok, err := regexp.MatchString("The container name \"[^\"]+\" is already in use", err.Error())
-	if err != nil {
-		panic(err)
-	}
-
-	return ok
 }
 
 func (b Backend) pullImage(ctx context.Context, image string) error {
@@ -127,6 +117,7 @@ func (b Backend) pullImage(ctx context.Context, image string) error {
 		return errors.WithStack(err)
 	}
 
+	// Wait until image pulling ends (= when rc is closed)
 	if _, err := ioutil.ReadAll(rc); err != nil {
 		return errors.WithStack(err)
 	}
@@ -154,10 +145,9 @@ func (b Backend) createContainer(ctx context.Context, exporter models.Exporter) 
 	}
 	networkingConfig := network.NetworkingConfig{}
 
-	exporterName := fmt.Sprintf("%s-exporter", exporter.Exported.Name)
-	container, err := b.cli.ContainerCreate(ctx, &config, &hostConfig, &networkingConfig, exporterName)
+	container, err := b.cli.ContainerCreate(ctx, &config, &hostConfig, &networkingConfig, exporter.Name)
 	if err != nil {
-		return exporterName, errors.WithStack(err)
+		return exporter.Name, errors.WithStack(err)
 	}
 
 	logger := log.GetLogger(ctx)
@@ -169,7 +159,7 @@ func (b Backend) createContainer(ctx context.Context, exporter models.Exporter) 
 		}).Warning("Docker emitted warnings during container create.")
 	}
 
-	return exporterName, nil
+	return exporter.Name, nil
 }
 
 func (b Backend) connectToNetwork(ctx context.Context, exporter models.Exporter, cid string) error {
@@ -214,10 +204,7 @@ func (b Backend) StopExporter(ctx context.Context, exporter types.ContainerJSON)
 	}
 
 	logger := log.GetLogger(ctx)
-	logger.WithFields(logrus.Fields{
-		"exported.id":   exporter.Config.Labels[LABEL_EXPORTED_ID],
-		"exported.name": exporter.Config.Labels[LABEL_EXPORTED_NAME],
-	}).Info("Exporter container stopped.")
+	logger.Info("Exporter container stopped.")
 
 	return nil
 }
@@ -236,15 +223,14 @@ func (b Backend) StartMissingExporters(ctx context.Context, promNetwork string) 
 	}
 
 	// Iterate over containers to find which one should have an associated
-	// exporter running but does not have one
+	// exporter running but does not
 	for _, container := range containers {
 		// Ignore exporters
 		if _, ok := container.Labels[LABEL_EXPORTED_NAME]; ok {
 			continue
 		}
 
-		exporterName := fmt.Sprintf("%s-exporter", container.Names[0])
-
+		exporterName := getExporterName(container.Names[0])
 		if _, ok := containerNames[exporterName]; ok {
 			continue
 		}
@@ -280,10 +266,11 @@ func (b Backend) CleanupStaleExporters(ctx context.Context) error {
 	logger.Debugf("Found %d running exporters.", len(exporters))
 
 	for _, container := range exporters {
-		ctx := log.WithLogger(ctx, logger.WithFields(logrus.Fields{
+		logger = logger.WithFields(logrus.Fields{
 			"exporter.cid":  container.ID,
 			"exporter.name": container.Names[0],
-		}))
+		})
+		ctx := log.WithLogger(ctx, logger)
 
 		err := b.CleanupExporter(ctx, container.ID, false)
 		if err != nil && !IsErrExportedStillRunning(err) {
@@ -307,7 +294,7 @@ func (b Backend) CleanupAllExporters(ctx context.Context) error {
 	}
 
 	logger := log.GetLogger(ctx)
-	logger.Debugf("Found %d exporters.", len(exporters))
+	logger.Debugf("Found %d exporters to clean up...", len(exporters))
 
 	for _, container := range exporters {
 		logger := logger.WithFields(logrus.Fields{
@@ -331,13 +318,20 @@ func (b Backend) CleanupExporter(ctx context.Context, cid string, force bool) er
 		return errors.WithStack(err)
 	}
 
-	// If the exported container is still alive and force is false, cleanup process is aborted
-	exported, err := b.cli.ContainerInspect(ctx, exporter.Config.Labels[LABEL_EXPORTED_ID])
+	exportedTaskId := exporter.Config.Labels[LABEL_EXPORTED_ID]
+	exported, err := b.cli.ContainerInspect(ctx, exportedTaskId)
+
 	if err != nil && !client.IsErrNotFound(err) {
 		return errors.WithStack(err)
 	} else if err == nil && exported.State.Running && !force {
-		return newErrExportedStillRunning(cid, exporter.Config.Labels[LABEL_EXPORTED_ID])
+		return newErrExportedTaskStillRunning(cid, exportedTaskId)
 	}
+
+	logger := log.GetLogger(ctx).WithFields(logrus.Fields{
+		"exported.id":   exportedTaskId,
+		"exported.name": exporter.Config.Labels[LABEL_EXPORTED_NAME],
+	})
+	ctx = log.WithLogger(ctx, logger)
 
 	return b.StopExporter(ctx, exporter)
 }
@@ -360,106 +354,108 @@ func (b Backend) FindAssociatedExporter(ctx context.Context, exportedId string) 
 	return containers[0], true, nil
 }
 
-func (b Backend) GetPromStaticConfigs(ctx context.Context, promNetwork string) ([]*models.StaticConfig, error) {
-	var res []*models.StaticConfig
+func (b Backend) GetPromStaticConfig(ctx context.Context, promNetwork string) (*models.StaticConfig, error) {
+	endpoints, err := b.listNetworkEndpoints(ctx, promNetwork)
+	if err != nil {
+		return nil, err
+	}
 
-	exported, err := b.cli.TaskList(ctx, types.TaskListOptions{
+	tasks, err := b.cli.TaskList(ctx, types.TaskListOptions{
 		Filters: filters.NewArgs(
 			filters.Arg("desired-state", "running"),
 		),
 	})
 	if err != nil {
-		return res, errors.WithStack(err)
+		return nil, errors.WithStack(err)
 	}
 
-	exportedTasks := make(map[string]map[string]string)
-	servicesName := make(map[string]string)
-	staticConfigs := make(map[string]*models.StaticConfig, 0)
+	services := map[string]string{}
+	staticConfig := models.NewStaticConfig()
+	logger := log.GetLogger(ctx)
 
-	for _, task := range exported {
-		// When the task is a container, task.Spec.Runtime is empty
-		// and thus does not match swarm.RuntimeContainer
+	for _, task := range tasks {
 		if task.Spec.Runtime == swarm.RuntimePlugin ||
 			task.Spec.Runtime == swarm.RuntimeNetworkAttachment {
 			continue
 		}
 
-		// We first check if an exporter name has been explicitly provided
-		// Then we try to find a predefined exporter matching service name
-		exporterName := task.Spec.ContainerSpec.Labels[LABEL_EXPORTER_NAME]
-		if exporterName == "" {
-			// Cache the service name, as multiple tasks might depend upon the same service
-			if _, ok := servicesName[task.ServiceID]; !ok {
-				service, _, err := b.cli.ServiceInspectWithRaw(ctx, task.ServiceID, types.ServiceInspectOptions{})
-				if err != nil {
-					return res, err
-				}
-
-				servicesName[task.ServiceID] = service.Spec.Name
+		// Cache the service name associated to the task ServiceID,
+		// as multiple tasks might come from the same service
+		if _, ok := services[task.ServiceID]; !ok {
+			service, _, err := b.cli.ServiceInspectWithRaw(ctx, task.ServiceID, types.ServiceInspectOptions{})
+			if err != nil {
+				return nil, errors.WithStack(err)
 			}
 
-			exporterName = models.FindMatchingExporter(servicesName[task.ServiceID])
+			services[task.ServiceID] = service.Spec.Name
+		}
+
+		taskName := fmt.Sprintf("%s.%d.%s", services[task.ServiceID], task.Slot, task.ID)
+		if _, ok := endpoints[taskName]; !ok {
+			continue
+		}
+
+		// We first check if an exporter name has been explicitly provided
+		// Then we try to find a predefined exporter matching service name
+		exporterType := task.Spec.ContainerSpec.Labels[LABEL_EXPORTER_NAME]
+		if exporterType == "" {
+			exporterType = models.FindMatchingExporter(services[task.ServiceID])
 		}
 
 		// Finally, this task is ignored if no exporter has been infered
-		if exporterName == "" {
+		if exporterType == "" {
 			continue
 		}
 
-		// Ignore this task too if the associated exporter does not exist
-		if !models.PredefinedExporterExist(exporterName) {
+		// Ignore this task, if the associated exporter does not exist
+		if !models.PredefinedExporterExist(exporterType) {
 			continue
 		}
 
-		exportedTasks[task.ID] = map[string]string{
-			"exporter": exporterName,
-			"service":  task.ServiceID,
+		ip, _, err := net.ParseCIDR(endpoints[taskName])
+		if err != nil {
+			logger.Error(err)
+			continue
 		}
+
+		port, err := models.GetExporterPort(exporterType)
+		if err != nil {
+			logger.Error(err)
+			continue
+		}
+
+		target := fmt.Sprintf("%s:%s", ip.String(), port)
+		labels := map[string]string{
+			"job": fmt.Sprintf("autoexporter-%s", exporterType),
+			"swarm_service_name": services[task.ServiceID],
+			"swarm_task_slot": strconv.Itoa(task.Slot),
+			"swarm_task_id": task.ID,
+		}
+
+		staticConfig.AddTarget(target, labels)
+		logger.WithFields(logrus.Fields{
+			"labels": labels,
+		}).Debugf("Add exporter %s for target %s", exporterType, target)
 	}
 
-	network, err := b.cli.NetworkInspect(ctx, promNetwork, types.NetworkInspectOptions{})
+	return staticConfig, nil
+}
+
+func (b Backend) listNetworkEndpoints(ctx context.Context, networkName string) (map[string]string, error) {
+	network, err := b.cli.NetworkInspect(ctx, networkName, types.NetworkInspectOptions{})
+
 	if err != nil {
-		return res, errors.WithStack(err)
+		return nil, errors.WithStack(err)
 	}
 
-	for _, container := range network.Containers {
-		for taskID, exported := range exportedTasks {
-			exporterName := exported["exporter"]
-			serviceID := exported["serviceID"]
-
-			match, err := regexp.MatchString("\\."+taskID+"$", container.Name)
-			if err != nil {
-				return res, err
-			} else if !match {
-				continue
-			}
-
-			ip, _, err := net.ParseCIDR(container.IPv4Address)
-			if err != nil {
-				return res, err
-			}
-
-			if _, ok := staticConfigs[serviceID]; !ok {
-				staticConfigs[serviceID] = models.NewStaticConfig()
-			}
-
-			port, err := models.GetExporterPort(exporterName)
-			if err != nil {
-				return res, err
-			}
-
-			// @TODO: add labels
-			addr := fmt.Sprintf("%s:%s", ip.String(), port)
-			staticConfigs[serviceID].AddTarget(addr)
-
-			logger := log.GetLogger(ctx)
-			logger.Debugf("Add exporter %s for %s", exporterName, addr)
-		}
+	endpoints := map[string]string{}
+	for _, c := range network.Containers {
+		endpoints[c.Name] = c.IPv4Address
 	}
 
-	for _, conf := range staticConfigs {
-		res = append(res, conf)
-	}
+	return endpoints, nil
+}
 
-	return res, nil
+func getExporterName(containerName string) string {
+	return fmt.Sprintf("/exporter.%s", strings.TrimLeft(containerName, "/"))
 }

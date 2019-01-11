@@ -5,21 +5,23 @@ import (
 )
 
 type Exporter struct {
-	Name        string
-	Image       string
-	Cmd         []string
-	EnvVars     []string
-	PromNetwork string
-	Exported    types.ContainerJSON
+	Name           string
+	PredefinedType string
+	Image          string
+	Cmd            []string
+	EnvVars        []string
+	PromNetwork    string
+	Exported       types.ContainerJSON
 }
 
-func NewExporter(name, image string, cmd, envVars []string, exported types.ContainerJSON) Exporter {
+func NewExporter(name, predefinedType, image string, cmd, envVars []string, exported types.ContainerJSON) Exporter {
 	return Exporter{
-		Name:        name,
-		Image:       image,
-		Cmd:         cmd,
-		EnvVars:     envVars,
-		PromNetwork: "",
-		Exported:    exported,
+		Name:           name,
+		PredefinedType: predefinedType,
+		Image:          image,
+		Cmd:            cmd,
+		EnvVars:        envVars,
+		PromNetwork:    "",
+		Exported:       exported,
 	}
 }

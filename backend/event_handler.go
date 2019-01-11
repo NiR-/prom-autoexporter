@@ -20,19 +20,19 @@ import (
 )
 
 // Thread-safe collection of context.CancelFunc
-type cancelCollection struct {
+type cancellableCollection struct {
 	mutex sync.RWMutex
 	funcs map[string]context.CancelFunc
 }
 
-func newCancelCollection() cancelCollection {
-	return cancelCollection{
+func newCancellableCollection() cancellableCollection {
+	return cancellableCollection{
 		mutex: sync.RWMutex{},
 		funcs: make(map[string]context.CancelFunc, 0),
 	}
 }
 
-func (c cancelCollection) cancel(k string) bool {
+func (c cancellableCollection) cancel(k string) bool {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -47,7 +47,7 @@ func (c cancelCollection) cancel(k string) bool {
 	return ok
 }
 
-func (c cancelCollection) add(k string, ctx context.Context) context.Context {
+func (c cancellableCollection) add(k string, ctx context.Context) context.Context {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -55,7 +55,7 @@ func (c cancelCollection) add(k string, ctx context.Context) context.Context {
 	return ctx
 }
 
-func (c cancelCollection) remove(k string) {
+func (c cancellableCollection) remove(k string) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
@@ -73,7 +73,7 @@ func (b Backend) ListenEventsForExported(ctx context.Context, promNetwork string
 		),
 	})
 
-	cancellables := newCancelCollection()
+	cancellables := newCancellableCollection()
 
 	for {
 		select {
@@ -131,6 +131,7 @@ func (b Backend) ListenEventsForExported(ctx context.Context, promNetwork string
 	}
 }
 
+// @TODO: implement true back-off retry
 func retry(times uint, interval time.Duration, f func() error) error {
 	err := f()
 
@@ -151,21 +152,21 @@ func (b Backend) handleContainerStart(ctx context.Context, containerId, promNetw
 	container, err := b.cli.ContainerInspect(ctx, containerId)
 
 	if client.IsErrNotFound(err) {
-		logger.Info("Contained died prematurly, exporter won't start.")
+		logger.Info("Container died prematurly, exporter won't start.")
 		return nil
 	} else if err != nil {
 		return errors.WithStack(err)
 	}
 
 	// We first check if an exporter name has been explicitly provided
-	exporterName, err := readLabel(container, LABEL_EXPORTER_NAME)
+	exporterType, err := readLabel(container, LABEL_EXPORTER_NAME)
 	if err != nil {
 		return err
 	}
 
 	// Then we try to find a predefined exporter matching container metadata
-	if exporterName == "" {
-		exporterName = models.FindMatchingExporter(container.Name)
+	if exporterType == "" {
+		exporterType = models.FindMatchingExporter(container.Name)
 	}
 
 	logger = logger.WithFields(logrus.Fields{
@@ -174,15 +175,16 @@ func (b Backend) handleContainerStart(ctx context.Context, containerId, promNetw
 	ctx = log.WithLogger(ctx, logger)
 
 	// At this point, if no exporter has been found, we abort start up process
-	if exporterName == "" {
-		logger.Info("No exporter name provided and no matching exporter found.")
+	if exporterType == "" {
+		logger.Debug("No exporter name provided and no matching exporter found.")
 
 		return nil
 	}
 
-	exporter, err := models.FromPredefinedExporter(exporterName, container)
+	exporterName := getExporterName(container.Name)
+	exporter, err := models.FromPredefinedExporter(exporterName, exporterType, container)
 	if models.IsErrPredefinedExporterNotFound(err) {
-		logger.Warnf("No predefined exporter named %q found.", exporterName)
+		logger.Warnf("No predefined exporter named %q found.", exporterType)
 		return nil
 	} else if err != nil {
 		return err
@@ -230,5 +232,5 @@ func (b Backend) handleContainerStop(ctx context.Context, containerId string) er
 		return nil
 	}
 
-	return b.CleanupExporter(ctx, exporter.ID, false)
+	return b.CleanupExporter(ctx, exporter.ID, true)
 }
