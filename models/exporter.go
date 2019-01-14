@@ -10,7 +10,6 @@ type Exporter struct {
 	Image          string
 	Cmd            []string
 	EnvVars        []string
-	PromNetwork    string
 	Exported       types.ContainerJSON
 }
 
@@ -21,7 +20,6 @@ func NewExporter(name, predefinedType, image string, cmd, envVars []string, expo
 		Image:          image,
 		Cmd:            cmd,
 		EnvVars:        envVars,
-		PromNetwork:    "",
 		Exported:       exported,
 	}
 }

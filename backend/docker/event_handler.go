@@ -1,6 +1,6 @@
-package backend
+package docker
 
-import (
+/* import (
 	"bufio"
 	"bytes"
 	"context"
@@ -19,53 +19,8 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// Thread-safe collection of context.CancelFunc
-type cancellableCollection struct {
-	mutex sync.RWMutex
-	funcs map[string]context.CancelFunc
-}
-
-func newCancellableCollection() cancellableCollection {
-	return cancellableCollection{
-		mutex: sync.RWMutex{},
-		funcs: make(map[string]context.CancelFunc, 0),
-	}
-}
-
-func (c cancellableCollection) cancel(k string) bool {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	var f func()
-	var ok bool
-
-	if f, ok = c.funcs[k]; ok {
-		f()
-		delete(c.funcs, k)
-	}
-
-	return ok
-}
-
-func (c cancellableCollection) add(k string, ctx context.Context) context.Context {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	ctx, c.funcs[k] = context.WithCancel(ctx)
-	return ctx
-}
-
-func (c cancellableCollection) remove(k string) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	if _, ok := c.funcs[k]; ok {
-		delete(c.funcs, k)
-	}
-}
-
-func (b Backend) ListenEventsForExported(ctx context.Context, promNetwork string) {
-	evtCh, errCh := b.cli.Events(ctx, types.EventsOptions{
+func (b DockerBackend) ListenForTasksToExport(ctx context.Context) {
+	dockEvtCh, dockErrCh := b.cli.Events(ctx, types.EventsOptions{
 		Since: time.Now().Format(time.RFC3339),
 		Filters: filters.NewArgs(
 			filters.Arg("type", events.ContainerEventType),
@@ -73,13 +28,11 @@ func (b Backend) ListenEventsForExported(ctx context.Context, promNetwork string
 		),
 	})
 
-	cancellables := newCancellableCollection()
-
 	for {
 		select {
-		case err := <-errCh:
+		case err := <-dockErrCh:
 			panic(err)
-		case evt := <-evtCh:
+		case evt := <-dockEvtCh:
 			// Ignore exporters
 			if _, ok := evt.Actor.Attributes[LABEL_EXPORTED_NAME]; ok {
 				continue
@@ -108,51 +61,25 @@ func (b Backend) ListenEventsForExported(ctx context.Context, promNetwork string
 			}
 
 			go func(ctx context.Context, evt events.Message) {
-				handler := func() error {
-					switch evt.Action {
-					case "start":
-						return b.handleContainerStart(ctx, evt.Actor.ID, promNetwork)
-					case "die":
-						return b.handleContainerStop(ctx, evt.Actor.ID)
-					default:
-						return fmt.Errorf("Action %q for %s %q is not supported.", evt.Action, evt.Type, evt.Actor.ID)
-					}
+				switch evt.Action {
+				case "start":
+					return b.handleContainerStart(ctx, evt.Actor.ID)
+				case "die":
+					return b.handleContainerStop(ctx, evt.Actor.ID)
+				default:
+					return fmt.Errorf("Action %q for %s %q is not supported.", evt.Action, evt.Type, evt.Actor.ID)
 				}
-
-				logger := log.GetLogger(ctx)
-
-				if err := retry(3, 5, handler); err != nil {
-					logger.Errorf("%+v", err)
-				}
-
-				cancellables.remove(evt.Actor.ID)
 			}(ctx, evt)
 		}
 	}
 }
 
-// @TODO: implement true back-off retry
-func retry(times uint, interval time.Duration, f func() error) error {
-	err := f()
-
-	if err != nil {
-		times = times - 1
-	}
-	if times != 0 && err != nil {
-		time.Sleep(interval)
-
-		err = retry(times, interval, f)
-	}
-
-	return err
-}
-
-func (b Backend) handleContainerStart(ctx context.Context, containerId, promNetwork string) error {
+func (b DockerBackend) handleContainerStart(ctx context.Context, containerId, promNetwork string) error {
 	logger := log.GetLogger(ctx)
 	container, err := b.cli.ContainerInspect(ctx, containerId)
 
 	if client.IsErrNotFound(err) {
-		logger.Info("Container died prematurly, exporter won't start.")
+		logger.Info("Container to export died prematurly...")
 		return nil
 	} else if err != nil {
 		return errors.WithStack(err)
@@ -194,7 +121,6 @@ func (b Backend) handleContainerStart(ctx context.Context, containerId, promNetw
 		"exporter.image": exporter.Image,
 	}).Info("Starting exporter...")
 
-	exporter.PromNetwork = promNetwork
 	b.RunExporter(ctx, exporter)
 
 	return nil
@@ -223,7 +149,7 @@ func renderTpl(tplStr string, values interface{}) (string, error) {
 	return val, nil
 }
 
-func (b Backend) handleContainerStop(ctx context.Context, containerId string) error {
+func (b DockerBackend) handleContainerStop(ctx context.Context, containerId string) error {
 	exporter, found, err := b.FindAssociatedExporter(ctx, containerId)
 
 	if err != nil {
@@ -233,4 +159,4 @@ func (b Backend) handleContainerStop(ctx context.Context, containerId string) er
 	}
 
 	return b.CleanupExporter(ctx, exporter.ID, true)
-}
+} */
