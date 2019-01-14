@@ -63,6 +63,17 @@
   version = "v1.2.0"
 
 [[projects]]
+  name = "github.com/google/go-cmp"
+  packages = [
+    "cmp",
+    "cmp/internal/diff",
+    "cmp/internal/function",
+    "cmp/internal/value"
+  ]
+  revision = "3af367b6b30c263d47e8895973edcca9a49cf029"
+  version = "v0.2.0"
+
+[[projects]]
   name = "github.com/konsorten/go-windows-terminal-sequences"
   packages = ["."]
   revision = "5c8c8bd35d3832f5d134ae1e1e375b69a4d25242"
@@ -125,9 +136,21 @@
   revision = "cfb38830724cc34fedffe9a2a29fb54fa9169cd1"
   version = "v1.20.0"
 
+[[projects]]
+  name = "gotest.tools"
+  packages = [
+    "assert",
+    "assert/cmp",
+    "internal/difflib",
+    "internal/format",
+    "internal/source"
+  ]
+  revision = "1083505acf35a0bd8a696b26837e1fb3187a7a83"
+  version = "v2.3.0"
+
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "1a620c22e0cae16606f95550e422bcf2c1750a451964a48643786afa0a6ddfae"
+  inputs-digest = "bfadea148609ae5b7a646da593619974ef1b33eb95cbfd929aee1142e07ba03a"
   solver-name = "gps-cdcl"
   solver-version = 1
