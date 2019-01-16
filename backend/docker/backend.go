@@ -19,9 +19,9 @@ import (
 )
 
 const (
+	LABEL_EXPORTER      = "autoexporter.exporter"
 	LABEL_EXPORTED_ID   = "autoexporter.exported.id"
 	LABEL_EXPORTED_NAME = "autoexporter.exported.name"
-	LABEL_EXPORTER_NAME = "autoexporter.exporter"
 
 	stepPullImage = "pullImage"
 	stepCreate    = "create"
@@ -33,10 +33,11 @@ const (
 type DockerBackend struct {
 	cli         client.APIClient
 	promNetwork string
+	finder      models.ExporterFinder
 }
 
-func NewDockerBackend(cli client.APIClient, promNetwork string) DockerBackend {
-	return DockerBackend{cli, promNetwork}
+func NewDockerBackend(cli client.APIClient, promNetwork string, finder models.ExporterFinder) DockerBackend {
+	return DockerBackend{cli, promNetwork, finder}
 }
 
 type process struct {
@@ -49,8 +50,8 @@ func (b DockerBackend) RunExporter(ctx context.Context, exporter models.Exporter
 	var err error
 
 	logger := log.GetLogger(ctx).WithFields(logrus.Fields{
-		"exported.name":  exporter.Exported.Name,
-		"exporter.type":  exporter.PredefinedType,
+		"exported.name":  exporter.ExportedTask.Name,
+		"exporter.type":  exporter.ExporterType,
 		"exporter.name":  exporter.Name,
 		"exporter.image": exporter.Image,
 	})
@@ -135,12 +136,12 @@ func (b DockerBackend) createContainer(ctx context.Context, exporter models.Expo
 		Image:  exporter.Image,
 		Env:    exporter.EnvVars,
 		Labels: map[string]string{
-			LABEL_EXPORTED_ID:   exporter.Exported.ID,
-			LABEL_EXPORTED_NAME: exporter.Exported.Name,
+			LABEL_EXPORTED_ID:   exporter.ExportedTask.ID,
+			LABEL_EXPORTED_NAME: exporter.ExportedTask.Name,
 		},
 	}
 	hostConfig := container.HostConfig{
-		NetworkMode: container.NetworkMode(fmt.Sprintf("container:%s", exporter.Exported.ID)),
+		NetworkMode: container.NetworkMode(fmt.Sprintf("container:%s", exporter.ExportedTask.ID)),
 		RestartPolicy: container.RestartPolicy{
 			Name:              "on-failure",
 			MaximumRetryCount: 10,
@@ -150,7 +151,7 @@ func (b DockerBackend) createContainer(ctx context.Context, exporter models.Expo
 
 	container, err := b.cli.ContainerCreate(ctx, &config, &hostConfig, &networkingConfig, exporter.Name)
 	if err != nil {
-		return exporter.Name, errors.WithStack(err)
+		return "", errors.WithStack(err)
 	}
 
 	logger := log.GetLogger(ctx)
@@ -193,10 +194,10 @@ func (b DockerBackend) startContainer(ctx context.Context, exporter models.Expor
 	return nil
 }
 
-/* func (b DockerBackend) FindMissingExporters(ctx context.Context) error {
+func (b DockerBackend) FindMissingExporters(ctx context.Context) ([]models.Exporter, error) {
 	containers, err := b.cli.ContainerList(ctx, types.ContainerListOptions{})
 	if err != nil {
-		return errors.WithStack(err)
+		return []models.Exporter{}, errors.WithStack(err)
 	}
 
 	containerNames := make(map[string]string, 0)
@@ -206,6 +207,8 @@ func (b DockerBackend) startContainer(ctx context.Context, exporter models.Expor
 		}
 	}
 
+	missing := make([]models.Exporter, 0)
+
 	// Iterate over containers to find which one should have an associated
 	// exporter running but does not
 	for _, container := range containers {
@@ -214,24 +217,51 @@ func (b DockerBackend) startContainer(ctx context.Context, exporter models.Expor
 			continue
 		}
 
-		exporterName := getExporterName(container.Names[0])
-		if _, ok := containerNames[exporterName]; ok {
-			continue
-		}
+		t := models.TaskToExport{container.ID, container.Names[0], container.Labels}
+		exporters := b.resolveExporters(ctx, t)
 
-		logger := log.GetLogger(ctx).WithFields(logrus.Fields{
-			"exported.id":   container.ID,
-			"exported.name": container.Names[0],
-		})
-		ctx := log.WithLogger(ctx, logger)
-
-		err := b.handleContainerStart(ctx, container.ID, b.promNetwork)
-		if err != nil {
-			logger.Errorf("%+v", err)
+		for _, exporter := range exporters {
+			if _, ok := containerNames[exporter.Name]; !ok {
+				missing = append(missing, exporter)
+			}
 		}
 	}
 
-	return nil
+	return missing, nil
+}
+
+func (b DockerBackend) resolveExporters(ctx context.Context, t models.TaskToExport) []models.Exporter {
+	// We first check if an exporter name has been explicitly provided
+	/* exporterType, err := readLabel(taskToExport, LABEL_EXPORTER)
+	if err != nil {
+		return []models.Exporter{}, err
+	} */
+
+	// @TODO: disable auto-resolve if label "autoexporter.auto=false" is present
+	// @TODO: customize exporters with labels
+	exporters := []models.Exporter{}
+	matching, errors := b.finder.FindMatchingExporters(t)
+
+	logger := log.GetLogger(ctx)
+	logger.Infof("Resolved %d exporters for %q.", len(matching), t.Name)
+
+	for _, err := range errors {
+		logger.Warning(err)
+	}
+
+	for pname, m := range matching {
+		m.Name = getExporterName(pname, t.Name)
+		exporters = append(exporters, m)
+	}
+
+	return exporters
+}
+
+/* func readLabel(taskToExport models.TaskToExport, label string) (string, error) {
+	if _, ok := taskToExport.Labels[label]; !ok {
+		return "", nil
+	}
+	return renderTpl(taskToExport.Labels[label], taskToExport)
 } */
 
 func (b DockerBackend) CleanupExporters(ctx context.Context, force bool) error {
@@ -325,6 +355,6 @@ func (b DockerBackend) stopExporter(ctx context.Context, exporter types.Containe
 	return nil
 }
 
-func getExporterName(containerName string) string {
-	return fmt.Sprintf("/exporter.%s", strings.TrimLeft(containerName, "/"))
+func getExporterName(exporterType, tname string) string {
+	return fmt.Sprintf("/exporter.%s.%s", exporterType, strings.TrimLeft(tname, "/"))
 }

@@ -1,4 +1,4 @@
-package docker
+package docker_test
 
 import (
 	"bytes"
@@ -15,9 +15,12 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/strslice"
 	"github.com/docker/docker/client"
+	backend "github.com/NiR-/prom-autoexporter/backend/docker"
 	"github.com/NiR-/prom-autoexporter/models"
 	"gotest.tools/assert"
 )
+
+type fakeFn int
 
 const (
 	containerInspectFn fakeFn = iota
@@ -26,7 +29,9 @@ const (
 	containerRemoveFn
 )
 
-type fakeFn int
+type fakeCall struct {
+	callsCounter uint
+}
 
 type fakeClient struct {
 	client.Client
@@ -42,10 +47,6 @@ type fakeClient struct {
 	networkDisconnectFn func(*fakeCall, context.Context, string, string, bool) error
 	containerStopFn     func(*fakeCall, context.Context, string, *time.Duration) error
 	containerRemoveFn   func(*fakeCall, context.Context, string, types.ContainerRemoveOptions) error
-}
-
-type fakeCall struct {
-	callsCounter uint
 }
 
 func (c *fakeClient) findFakeCall(fn fakeFn) *fakeCall {
@@ -202,23 +203,20 @@ func TestRunExporter(t *testing.T) {
 
 			ctx := context.Background()
 			exporter := models.Exporter{
-				Name: "exporter004",
-				PredefinedType: "redis",
-				Image: "oliver006/redis_exporter:latest",
-				Cmd: []string{"-redis.addr=redis://localhost:6379"},
-				EnvVars: []string{"FOO=BAR"},
-				Exported: types.ContainerJSON{
-					&types.ContainerJSONBase{
-						Name: "task-to-export",
-						ID:   "012dfc9",
-					},
-					[]types.MountPoint{},
-					&container.Config{},
-					&types.NetworkSettings{},
+				Name:         "exporter004",
+				ExporterType: "redis",
+				Image:        "oliver006/redis_exporter:latest",
+				Cmd:          []string{"-redis.addr=redis://localhost:6379"},
+				EnvVars:      []string{"FOO=BAR"},
+				ExportedTask: models.TaskToExport{
+					ID:     "012dfc9",
+					Name:   "task-to-export",
+					Labels: map[string]string{},
 				},
 			}
 
-			b := NewDockerBackend(cli, "testnet")
+			f := models.NewPredefinedExporterFinder()
+			b := backend.NewDockerBackend(cli, "testnet", f)
 			err := b.RunExporter(ctx, exporter)
 
 			if expectedError != "" {
@@ -243,22 +241,19 @@ func TestCancelRunExporter(t *testing.T) {
 		},
 	}
 	exporter := models.Exporter{
-		Name: "exporter004",
-		PredefinedType: "redis",
-		Image: "oliver006/redis_exporter:latest",
-		Cmd: []string{"-redis.addr=redis://localhost:6379"},
-		EnvVars: []string{"FOO=BAR"},
-		Exported: types.ContainerJSON{
-			&types.ContainerJSONBase{
-				Name: "task-to-export",
-				ID:   "012dfc9",
-			},
-			[]types.MountPoint{},
-			&container.Config{},
-			&types.NetworkSettings{},
+		Name:           "exporter004",
+		ExporterType: "redis",
+		Image:          "oliver006/redis_exporter:latest",
+		Cmd:            []string{"-redis.addr=redis://localhost:6379"},
+		EnvVars:        []string{"FOO=BAR"},
+		ExportedTask:   models.TaskToExport{
+			ID:     "012dfc9",
+			Name:   "task-to-export",
+			Labels: map[string]string{},
 		},
 	}
-	b := NewDockerBackend(cli, "testnet")
+	f := models.NewPredefinedExporterFinder()
+	b := backend.NewDockerBackend(cli, "testnet", f)
 	err := b.RunExporter(ctx, exporter)
 
 	assert.NilError(t, err)
@@ -280,7 +275,7 @@ func TestCleanupExporter(t *testing.T) {
 							ID: "exporter-cid",
 							Names: []string{"exporter001"},
 							Labels: map[string]string{
-								LABEL_EXPORTED_ID: "exported-task-cid",
+								backend.LABEL_EXPORTED_ID: "exported-task-cid",
 							},
 						},
 					}, nil
@@ -316,7 +311,7 @@ func TestCleanupExporter(t *testing.T) {
 						{
 							ID: "exporter-cid",
 							Labels: map[string]string{
-								LABEL_EXPORTED_ID: "exported-task-cid",
+								backend.LABEL_EXPORTED_ID: "exported-task-cid",
 							},
 						},
 					}, nil
@@ -343,7 +338,7 @@ func TestCleanupExporter(t *testing.T) {
 						{
 							ID: "exporter-cid",
 							Labels: map[string]string{
-								LABEL_EXPORTED_ID: "exported-task-cid",
+								backend.LABEL_EXPORTED_ID: "exported-task-cid",
 							},
 						},
 					}, nil
@@ -364,7 +359,7 @@ func TestCleanupExporter(t *testing.T) {
 						{
 							ID: "exporter-cid",
 							Labels: map[string]string{
-								LABEL_EXPORTED_ID: "exported-task-cid",
+								backend.LABEL_EXPORTED_ID: "exported-task-cid",
 							},
 						},
 					}, nil
@@ -389,7 +384,7 @@ func TestCleanupExporter(t *testing.T) {
 						{
 							ID: "exporter-cid",
 							Labels: map[string]string{
-								LABEL_EXPORTED_ID: "exported-task-cid",
+								backend.LABEL_EXPORTED_ID: "exported-task-cid",
 							},
 						},
 					}, nil
@@ -413,7 +408,7 @@ func TestCleanupExporter(t *testing.T) {
 							ID: "exporter-cid",
 							Names: []string{"exporter007"},
 							Labels: map[string]string{
-								LABEL_EXPORTED_ID: "exported-task-cid",
+								backend.LABEL_EXPORTED_ID: "exported-task-cid",
 							},
 						},
 					}, nil
@@ -442,7 +437,8 @@ func TestCleanupExporter(t *testing.T) {
 			t.Parallel()
 
 			ctx := context.Background()
-			b := NewDockerBackend(cli, "testnet")
+			f := models.NewPredefinedExporterFinder()
+			b := backend.NewDockerBackend(cli, "testnet", f)
 			err := b.CleanupExporter(ctx, exporterName, force)
 
 			if expectedError != "" {
@@ -487,14 +483,14 @@ func TestCleanupExporters(t *testing.T) {
 							ID: "exporter001-cid",
 							Names: []string{"exporter001"},
 							Labels: map[string]string{
-								LABEL_EXPORTED_ID: "exported-task001-cid",
+								backend.LABEL_EXPORTED_ID: "exported-task001-cid",
 							},
 						},
 						{
 							ID: "exporter002-cid",
 							Names: []string{"exporter002"},
 							Labels: map[string]string{
-								LABEL_EXPORTED_ID: "exported-task002-cid",
+								backend.LABEL_EXPORTED_ID: "exported-task002-cid",
 							},
 						},
 					}, nil
@@ -534,21 +530,21 @@ func TestCleanupExporters(t *testing.T) {
 							ID: "exporter001-cid",
 							Names: []string{"exporter001"},
 							Labels: map[string]string{
-								LABEL_EXPORTED_ID: "exported-task001-cid",
+								backend.LABEL_EXPORTED_ID: "exported-task001-cid",
 							},
 						},
 						{
 							ID: "exporter002-cid",
 							Names: []string{"exporter002"},
 							Labels: map[string]string{
-								LABEL_EXPORTED_ID: "exported-task002-cid",
+								backend.LABEL_EXPORTED_ID: "exported-task002-cid",
 							},
 						},
 						{
 							ID: "exporter003-cid",
 							Names: []string{"exporter003"},
 							Labels: map[string]string{
-								LABEL_EXPORTED_ID: "exported-task003-cid",
+								backend.LABEL_EXPORTED_ID: "exported-task003-cid",
 							},
 						},
 					}, nil
@@ -590,7 +586,8 @@ func TestCleanupExporters(t *testing.T) {
 			// t.Parallel()
 
 			ctx := context.Background()
-			b := NewDockerBackend(cli, "testnet")
+			f := models.NewPredefinedExporterFinder()
+			b := backend.NewDockerBackend(cli, "testnet", f)
 			err := b.CleanupExporters(ctx, force)
 
 			if expectedError != "" {
@@ -600,4 +597,76 @@ func TestCleanupExporters(t *testing.T) {
 			assert.NilError(t, err)
 		})
 	}
+}
+
+func TestFindMissingExporters(t *testing.T) {
+	cli := &fakeClient{
+		containerListFn: func(ctx context.Context, opts types.ContainerListOptions) ([]types.Container, error) {
+			return []types.Container{
+				{
+					ID: "exported-task001-cid",
+					Names: []string{"/exported-task001"},
+					Labels: map[string]string{},
+				},
+				{
+					ID: "exporter001-cid",
+					Names: []string{"/exporter.type.exported-task001"},
+					Labels: map[string]string{
+						backend.LABEL_EXPORTED_ID:   "exported-task001-cid",
+						backend.LABEL_EXPORTED_NAME: "exported-task001",
+					},
+				},
+				{
+					ID: "exported-task002-cid",
+					Names: []string{"/redis"},
+					Labels: map[string]string{},
+				},
+			}, nil
+		},
+	}
+
+	f := fakeExporterFinder{
+		findMatchingExportersFn: func(t models.TaskToExport) map[string]models.Exporter {
+			name := "type"
+			image := "some/image"
+
+			if t.Name == "/redis" {
+				name = "redis"
+				image = "oliver006/redis_exporter:v0.25.0"
+			}
+
+			exporter, _ := models.NewExporter(name, name, image, []string{}, []string{}, t)
+
+			return map[string]models.Exporter{
+				name: exporter,
+			}
+		},
+	}
+
+	b := backend.NewDockerBackend(cli, "testnet", f)
+	missing, err := b.FindMissingExporters(context.Background())
+	assert.NilError(t, err)
+
+	assert.DeepEqual(t, missing, []models.Exporter{
+		{
+			Name:         "/exporter.redis.redis",
+			ExporterType: "redis",
+			Image:        "oliver006/redis_exporter:v0.25.0",
+			Cmd:          []string{},
+			EnvVars:      []string{},
+			ExportedTask: models.TaskToExport{
+				ID:   "exported-task002-cid",
+				Name: "/redis",
+				Labels: map[string]string{},
+			},
+		},
+	})
+}
+
+type fakeExporterFinder struct{
+	findMatchingExportersFn func(t models.TaskToExport) map[string]models.Exporter
+}
+
+func (f fakeExporterFinder) FindMatchingExporters(t models.TaskToExport) (map[string]models.Exporter, []error) {
+	return f.findMatchingExportersFn(t), []error{}
 }
