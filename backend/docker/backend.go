@@ -358,3 +358,7 @@ func (b DockerBackend) stopExporter(ctx context.Context, exporter types.Containe
 func getExporterName(exporterType, tname string) string {
 	return fmt.Sprintf("/exporter.%s.%s", exporterType, strings.TrimLeft(tname, "/"))
 }
+
+func (b DockerBackend) GetPromStaticConfig(context.Context) (*models.StaticConfig, error) {
+	panic(errors.New("not implemented yet."))
+}

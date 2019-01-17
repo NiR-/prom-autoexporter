@@ -12,6 +12,7 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/strslice"
 	"github.com/docker/docker/client"
@@ -47,6 +48,7 @@ type fakeClient struct {
 	networkDisconnectFn func(*fakeCall, context.Context, string, string, bool) error
 	containerStopFn     func(*fakeCall, context.Context, string, *time.Duration) error
 	containerRemoveFn   func(*fakeCall, context.Context, string, types.ContainerRemoveOptions) error
+	eventsFn            func(context.Context, types.EventsOptions) (<-chan events.Message, <-chan error)
 }
 
 func (c *fakeClient) findFakeCall(fn fakeFn) *fakeCall {

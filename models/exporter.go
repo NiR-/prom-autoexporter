@@ -25,12 +25,12 @@ type Exporter struct {
 }
 
 func NewExporter(name, exporterType, image string, cmd, envVars []string, t TaskToExport) (Exporter, error) {
-	cmd, err := renderSliceOfTpls(cmd, t)
+	cmd, err := renderTpls(cmd, t)
 	if err != nil {
 		return Exporter{}, err
 	}
 
-	envVars, err = renderSliceOfTpls(envVars, t)
+	envVars, err = renderTpls(envVars, t)
 	if err != nil {
 		return Exporter{}, err
 	}
@@ -46,7 +46,7 @@ func NewExporter(name, exporterType, image string, cmd, envVars []string, t Task
 }
 
 // This function will render multiple templates with the same set of values each time
-func renderSliceOfTpls(tpls []string, values interface{}) ([]string, error) {
+func renderTpls(tpls []string, values interface{}) ([]string, error) {
 	res := []string{}
 
 	for _, fragment := range tpls {
