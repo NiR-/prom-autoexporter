@@ -41,13 +41,13 @@ func AutoExport(c *cli.Context) {
 	logger := log.GetLogger(ctx)
 
 	logger.Info("Removing stale exporters...")
-	if err := b.CleanupExporters(ctx, forceRecreate); err != nil {
-		logrus.Errorf("%+v", err)
+	if err = b.CleanupExporters(ctx, forceRecreate); err != nil {
+		logger.Error("Cleanup failed: ", err)
 	}
 
 	logger.Info("Start listening for new backend events...")
 	taskEvtCh := make(chan models.TaskEvent)
-	go b.ListenForTasksToExport(ctx, evtCh)
+	go b.ListenForTasksToExport(ctx, taskEvtCh)
 
 	logger.Info("Starting missing exporters...")
 	missingExporters, err := b.FindMissingExporters(ctx)
@@ -57,10 +57,18 @@ func AutoExport(c *cli.Context) {
 
 	for _, exporter := range missingExporters {
 		cancellableID := fmt.Sprintf("%s.%s", exporter.ExportedTask.Name, exporter.ExporterType)
-		ctx = cancellables.add(cancellableID, ctx)
-		handler := startHandlerFactory(cancellables, ctx, b, exporter)
+		ctx := cancellables.add(cancellableID, ctx)
+		handler := startHandlerFactory(b, exporter)
 
-		go retry(ctx, 3, 30 * time.Second, handler)
+		logger := logger.WithFields(logrus.Fields{
+			"operation":   "start",
+			"exporter":    log.FormatExporterField(exporter),
+			"task":        log.FormatTaskField(exporter.ExportedTask),
+			"retry_count": 0,
+		})
+		ctx = log.WithLogger(ctx, logger)
+
+		go retry(cancellables, ctx, 3, 30 * time.Second, handler)
 	}
 
 	// Start ingesting backend events
@@ -68,46 +76,69 @@ func AutoExport(c *cli.Context) {
 		for _, exporter := range evt.Exporters {
 			cancellableID := fmt.Sprintf("%s.%s", evt.Task.Name, exporter.ExporterType)
 			if cancelled := cancellables.cancel(cancellableID); cancelled {
-				logger.Debugf("A previous start/stop process with ID %q has been cancelled.", cancellableID)
+				logger.Debugf("A previous start-up/clean-up operation for %q has been cancelled.", cancellableID)
 			}
 
-			var handler func() error
-			ctx = cancellables.add(cancellableID, ctx)
+			var handler func(context.Context) error
+			var op      string
+			ctx := cancellables.add(cancellableID, ctx)
 
 			if evt.Type == models.TaskStarted {
-				handler = startHandlerFactory(cancellables, ctx, b, exporter)
+				handler = startHandlerFactory(b, exporter)
+				op = "start"
 			} else {
-				handler = stopHandlerFactory(ctx, b, exporter)
+				handler = stopHandlerFactory(b, exporter)
+				op = "stop"
 			}
 
-			go retry(ctx, 3, 30 * time.Second, handler)
+			logger := logger.WithFields(logrus.Fields{
+				"operation":   op,
+				"exporter":    log.FormatExporterField(exporter),
+				"task":        log.FormatTaskField(exporter.ExportedTask),
+				"retry_count": 0,
+			})
+			ctx = log.WithLogger(ctx, logger)
+
+			go retry(cancellables, ctx, 3, 30 * time.Second, handler)
 		}
 	}
 
 	// @TODO: setup signal handler to properly stop listening
+	// @TODO: refactor log fields everywhere
 }
 
-// This function returns an anonymous function to start exporters.
-// This is especially useful for easily retrying the handler if it fails
-func startHandlerFactory(cancellables cancellableCollection, ctx context.Context, b backend.Backend, exporter models.Exporter) (func() error) {
-	return func() error {
+// This function returns a closure to start an exporter. It's used as an argument
+// to retry().
+func startHandlerFactory(b backend.Backend, exporter models.Exporter) func(context.Context) error {
+	return func(ctx context.Context) error {
 		err := b.RunExporter(ctx, exporter)
-		// When the exporter has sucessfully started, the cancellable associated
-		if err == nil {
-			cancellables.remove(ctx.Value(cancellableIDKey).(string))
+
+		// We need to cleanup resources created previously, in order to retry a failed startup
+		if err != nil {
+			cleanErr := b.CleanupExporter(ctx, exporter.Name, true)
+			if cleanErr != nil {
+				logger := log.GetLogger(ctx)
+				logger.Error("Clean-up of failed exporter start-up failed too: ", cleanErr.Error())
+			}
 		}
+
 		return err
 	}
 }
 
-func stopHandlerFactory(ctx context.Context, b backend.Backend, exporter models.Exporter) func() error {
-	return func() error {
+// This function returns a closure to cleanup an exporter. It's used as an argument
+// to retry().
+func stopHandlerFactory(b backend.Backend, exporter models.Exporter) func(context.Context) error {
+	return func(ctx context.Context) error {
 		return b.CleanupExporter(ctx, exporter.Name, false)
 	}
 }
 
-// It's used to store a thread-safe set of context cancellation functions called
-// when some exporters are being created whereas the exported container dies.
+// cancellableCollection stores a thread-safe set of context cancellation functions.
+// These functions are called to cancel running start/stop operation whereas the
+// exported task dies/restarts. Because concurrent routines need to add/remove
+// cancel functions to the set, a global mutex managed by add(), cancel() and
+// remove() methods is used.
 type cancellableCollection struct {
 	mutex sync.RWMutex
 	funcs map[string]context.CancelFunc
@@ -153,21 +184,40 @@ func (c cancellableCollection) remove(id string) {
 }
 
 // @TODO: implement true back-off retry
-func retry(ctx context.Context, times uint, interval time.Duration, fn func() error) error {
-	err := fn()
-	if err != nil {
-		times--
+// This function runs and retries a provided closure for a given number of attempts
+// while waiting for a given interval between each attempts. The closure takes
+// the context as argument as it carries out the logger.
+func retry(cancellables cancellableCollection, ctx context.Context, attempts uint, interval time.Duration, fn func(context.Context) error) error {
+	err := fn(ctx)
+	attempts--
+	if err == nil {
+		// When the exporter sucessfully starts or stops, the cancellable associated
+		// with this operation is removed as there's nothing to cancel anymore
+		cancellables.remove(ctx.Value(cancellableIDKey).(string))
+		return nil
 	}
-	if (times == 0 && err != nil) || err == nil {
+
+	logger := log.GetLogger(ctx)
+	if attempts == 0 {
+		logger.Errorf("Last operation retry failed with error: %s", err.Error())
 		return err
 	}
 
-	// Interrupt the retry as soon as the context got cancelled
+	retryCount := logger.Data["retry_count"].(int)
+	logger.Warningf("Operation failed with error: %s. Waiting %.0fs before retrying...",
+		err.Error(),
+		interval.Seconds())
+
+	// Interrupt the retry as soon as the context is cancelled
 	// or wait for the given interval and then retry
 	timer := time.NewTimer(interval)
 	select {
 	case <-timer.C:
-		err = retry(ctx, times, interval, fn)
+		retryCount++
+		logger = logger.WithField("retry_count", retryCount)
+		ctx = log.WithLogger(ctx, logger)
+
+		err = retry(cancellables, ctx, attempts, interval, fn)
 	case <-ctx.Done():
 	}
 

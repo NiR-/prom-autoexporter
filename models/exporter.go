@@ -21,10 +21,11 @@ type Exporter struct {
 	Image        string
 	Cmd          []string
 	EnvVars      []string
+	Port         string
 	ExportedTask TaskToExport
 }
 
-func NewExporter(name, exporterType, image string, cmd, envVars []string, t TaskToExport) (Exporter, error) {
+func NewExporter(name, exporterType, image string, cmd, envVars []string, port string, t TaskToExport) (Exporter, error) {
 	cmd, err := renderTpls(cmd, t)
 	if err != nil {
 		return Exporter{}, err
@@ -41,6 +42,7 @@ func NewExporter(name, exporterType, image string, cmd, envVars []string, t Task
 		Image:        image,
 		Cmd:          cmd,
 		EnvVars:      envVars,
+		Port:         port,
 		ExportedTask: t,
 	}, nil
 }
@@ -124,7 +126,7 @@ func (p PredefinedExporter) match(t TaskToExport) bool {
 }
 
 func (p PredefinedExporter) Exporter(t TaskToExport) (Exporter, error) {
-	return NewExporter("", p.name, p.image, p.cmd, p.envVars, t)
+	return NewExporter("", p.name, p.image, p.cmd, p.envVars, p.exporterPort, t)
 }
 
 /* func PredefinedExporterExist(predefinedExporter string) bool {
@@ -154,7 +156,6 @@ func newBoolMatcher(val bool) Matcher {
 	}
 }
 
-// @TODO: don't rely on swarm labels
 var (
 	defaultPredefinedExporters = map[string]PredefinedExporter{
 		"redis": PredefinedExporter{

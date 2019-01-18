@@ -15,6 +15,7 @@ func TestNewExporter(t *testing.T) {
 		image        string
 		cmd          []string
 		envVars      []string
+		port         string
 		taskToExport models.TaskToExport
 		expected     models.Exporter
 	}{
@@ -24,6 +25,7 @@ func TestNewExporter(t *testing.T) {
 			image:        "oliver006/redis_exporter:v0.25.0",
 			cmd:          []string{"-namespace={{ index .Labels \"service.name\" }}"},
 			envVars:      []string{"FOO={{ index .Labels \"service.name\" }}"},
+			port:         "9121",
 			taskToExport: models.TaskToExport{
 				ID:   "exported-task-cid",
 				Name: "exported-task",
@@ -35,6 +37,7 @@ func TestNewExporter(t *testing.T) {
 				Image:        "oliver006/redis_exporter:v0.25.0",
 				Cmd:          []string{"-namespace=redis"},
 				EnvVars:      []string{"FOO=redis"},
+				Port:         "9121",
 				ExportedTask: models.TaskToExport{
 					ID:   "exported-task-cid",
 					Name: "exported-task",
@@ -49,7 +52,7 @@ func TestNewExporter(t *testing.T) {
 			// tc := testcases[tcname]
 			// t.Parallel()
 
-			exporter, err := models.NewExporter(tc.name, tc.exporterType, tc.image, tc.cmd, tc.envVars, tc.taskToExport)
+			exporter, err := models.NewExporter(tc.name, tc.exporterType, tc.image, tc.cmd, tc.envVars, tc.port, tc.taskToExport)
 			assert.NilError(t, err)
 			assert.DeepEqual(t, exporter, tc.expected)
 		})
