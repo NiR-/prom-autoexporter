@@ -1,25 +1,23 @@
-package swarm
+package backend
 
 import (
 	"context"
-	"strconv"
 	"fmt"
 	"net"
-	"strings"
+	"strconv"
 
+	"github.com/NiR-/prom-autoexporter/log"
+	"github.com/NiR-/prom-autoexporter/models"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/client"
-	"github.com/NiR-/prom-autoexporter/backend/docker"
-	"github.com/NiR-/prom-autoexporter/log"
-	"github.com/NiR-/prom-autoexporter/models"
-	"github.com/sirupsen/logrus"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 )
 
 type SwarmBackend struct {
-	*docker.DockerBackend
+	*DockerBackend
 
 	cli         client.APIClient
 	promNetwork string
@@ -27,7 +25,7 @@ type SwarmBackend struct {
 }
 
 func NewSwarmBackend(cli client.APIClient, promNetwork string, f models.ExporterFinder) SwarmBackend {
-	b := docker.NewDockerBackend(cli, promNetwork, f)
+	b := NewDockerBackend(cli, promNetwork, f)
 	return SwarmBackend{&b, cli, promNetwork, f}
 }
 
@@ -82,10 +80,10 @@ func (b SwarmBackend) GetPromStaticConfig(ctx context.Context) (*models.StaticCo
 		for _, exporter := range b.resolveExporters(ctx, t) {
 			target := fmt.Sprintf("%s:%s", ip.String(), exporter.Port)
 			labels := map[string]string{
-				"job": fmt.Sprintf("autoexporter-%s", exporter.ExporterType),
+				"job":                fmt.Sprintf("autoexporter-%s", exporter.ExporterType),
 				"swarm_service_name": service.Name,
-				"swarm_task_slot": strconv.Itoa(task.Slot),
-				"swarm_task_id": task.ID,
+				"swarm_task_slot":    strconv.Itoa(task.Slot),
+				"swarm_task_id":      task.ID,
 			}
 
 			staticConfig.AddTarget(target, labels)
@@ -126,35 +124,4 @@ func (b SwarmBackend) findServiceSpec(ctx context.Context, serviceID string, cac
 	cache[serviceID] = service.Spec
 
 	return cache[serviceID], nil
-}
-
-func (b SwarmBackend) resolveExporters(ctx context.Context, t models.TaskToExport) []models.Exporter {
-	// We first check if an exporter name has been explicitly provided
-	/* exporterType, err := readLabel(taskToExport, LABEL_EXPORTER)
-	if err != nil {
-		return []models.Exporter{}, err
-	} */
-
-	// @TODO: disable auto-resolve if label "autoexporter.auto=false" is present
-	// @TODO: customize exporters with labels
-	exporters := []models.Exporter{}
-	matching, errors := b.finder.FindMatchingExporters(t)
-
-	logger := log.GetLogger(ctx)
-	logger.Debugf("Resolved %d exporters for %q.", len(matching), t.Name)
-
-	for _, err := range errors {
-		logger.Warning(err)
-	}
-
-	for pname, m := range matching {
-		m.Name = getExporterName(pname, t.Name)
-		exporters = append(exporters, m)
-	}
-
-	return exporters
-}
-
-func getExporterName(exporterType, tname string) string {
-	return fmt.Sprintf("/exporter.%s.%s", exporterType, strings.TrimLeft(tname, "/"))
 }
