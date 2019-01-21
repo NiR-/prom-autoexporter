@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/NiR-/prom-autoexporter/backend"
-	"github.com/NiR-/prom-autoexporter/backend/swarm"
 	"github.com/NiR-/prom-autoexporter/log"
 	"github.com/NiR-/prom-autoexporter/models"
 	"github.com/docker/docker/client"
@@ -33,7 +32,7 @@ func AutoConfig(c *cli.Context) {
 	defer cli.Close()
 	cli.NegotiateAPIVersion(ctx)
 
-	b := swarm.NewSwarmBackend(cli, promNetwork, models.NewPredefinedExporterFinder())
+	b := backend.NewSwarmBackend(cli, promNetwork, models.NewPredefinedExporterFinder())
 	go reconfigurePrometheus(ctx, b, filepath)
 
 	t := time.NewTicker(interval)

@@ -2,12 +2,11 @@ package cmd
 
 import (
 	"context"
-	"sync"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/NiR-/prom-autoexporter/backend"
-	"github.com/NiR-/prom-autoexporter/backend/docker"
 	"github.com/NiR-/prom-autoexporter/log"
 	"github.com/NiR-/prom-autoexporter/models"
 	"github.com/docker/docker/client"
@@ -36,7 +35,7 @@ func AutoExport(c *cli.Context) {
 	defer cli.Close()
 	cli.NegotiateAPIVersion(ctx)
 
-	b := docker.NewDockerBackend(cli, promNetwork, models.NewPredefinedExporterFinder())
+	b := backend.NewDockerBackend(cli, promNetwork, models.NewPredefinedExporterFinder())
 	cancellables := newCancellableCollection()
 	logger := log.GetLogger(ctx)
 
@@ -68,7 +67,7 @@ func AutoExport(c *cli.Context) {
 		})
 		ctx = log.WithLogger(ctx, logger)
 
-		go retry(cancellables, ctx, 3, 30 * time.Second, handler)
+		go retry(cancellables, ctx, 3, 30*time.Second, handler)
 	}
 
 	// Start ingesting backend events
@@ -80,7 +79,7 @@ func AutoExport(c *cli.Context) {
 			}
 
 			var handler func(context.Context) error
-			var op      string
+			var op string
 			ctx := cancellables.add(cancellableID, ctx)
 
 			if evt.Type == models.TaskStarted {
@@ -99,7 +98,7 @@ func AutoExport(c *cli.Context) {
 			})
 			ctx = log.WithLogger(ctx, logger)
 
-			go retry(cancellables, ctx, 3, 30 * time.Second, handler)
+			go retry(cancellables, ctx, 3, 30*time.Second, handler)
 		}
 	}
 

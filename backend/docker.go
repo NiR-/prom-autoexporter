@@ -1,4 +1,4 @@
-package docker
+package backend
 
 import (
 	"context"
@@ -6,11 +6,13 @@ import (
 	"io/ioutil"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/NiR-/prom-autoexporter/log"
 	"github.com/NiR-/prom-autoexporter/models"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
@@ -132,10 +134,10 @@ func (b DockerBackend) pullImage(ctx context.Context, image string) error {
 
 func (b DockerBackend) createContainer(ctx context.Context, exporter models.Exporter) (string, error) {
 	config := container.Config{
-		User:   "1000",
-		Cmd:    exporter.Cmd,
-		Image:  exporter.Image,
-		Env:    exporter.EnvVars,
+		User:  "1000",
+		Cmd:   exporter.Cmd,
+		Image: exporter.Image,
+		Env:   exporter.EnvVars,
 		Labels: map[string]string{
 			LABEL_EXPORTED_ID:   exporter.ExportedTask.ID,
 			LABEL_EXPORTED_NAME: exporter.ExportedTask.Name,
@@ -298,7 +300,7 @@ func (b DockerBackend) CleanupExporters(ctx context.Context, force bool) error {
 
 func (b DockerBackend) CleanupExporter(ctx context.Context, exporterName string, force bool) error {
 	c, err := b.cli.ContainerList(ctx, types.ContainerListOptions{
-		All:     true,
+		All: true,
 		Filters: filters.NewArgs(
 			filters.Arg("name", exporterName),
 		),
@@ -360,6 +362,71 @@ func (b DockerBackend) stopExporter(ctx context.Context, exporter types.Containe
 
 func getExporterName(exporterType, tname string) string {
 	return fmt.Sprintf("/exporter.%s.%s", exporterType, strings.TrimLeft(tname, "/"))
+}
+
+func (b DockerBackend) ListenForTasksToExport(ctx context.Context, evtCh chan<- models.TaskEvent) {
+	dockEvtCh, dockErrCh := b.cli.Events(ctx, types.EventsOptions{
+		Since: time.Now().Format(time.RFC3339),
+		Filters: filters.NewArgs(
+			filters.Arg("type", events.ContainerEventType),
+			filters.Arg("action", "start,die"),
+		),
+	})
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case err := <-dockErrCh:
+			panic(err)
+		case evt := <-dockEvtCh:
+			// Ignore exporters
+			if _, ok := evt.Actor.Attributes[LABEL_EXPORTED_NAME]; ok {
+				continue
+			}
+
+			// Ignore actions not filtered by docker daemon
+			// @TODO: check no actions missing
+			if evt.Action != "start" && evt.Action != "die" {
+				continue
+			}
+
+			evtType := models.TaskStarted
+			if evt.Action == "die" {
+				evtType = models.TaskStopped
+			}
+
+			logger := log.GetLogger(ctx).WithFields(logrus.Fields{
+				"event.type":   evt.Type,
+				"event.action": evt.Action,
+				"exported.cid": evt.Actor.ID,
+			})
+			ctx = log.WithLogger(ctx, logger)
+			logger.Debug("New container event received.")
+
+			taskId := evt.Actor.ID
+			taskName := evt.Actor.Attributes["name"]
+			labels := extractActorLabels(evt.Actor)
+
+			t := models.TaskToExport{taskId, taskName, labels}
+			exporters := b.resolveExporters(ctx, t)
+
+			evtCh <- models.TaskEvent{t, evtType, exporters}
+		}
+	}
+}
+
+func extractActorLabels(actor events.Actor) map[string]string {
+	labels := make(map[string]string)
+
+	for k, v := range actor.Attributes {
+		if k == "name" || k == "image" || k == "exitCode" {
+			continue
+		}
+		labels[k] = v
+	}
+
+	return labels
 }
 
 func (b DockerBackend) GetPromStaticConfig(context.Context) (*models.StaticConfig, error) {
