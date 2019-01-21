@@ -12,6 +12,7 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/strslice"
 	"github.com/docker/docker/client"
@@ -47,6 +48,7 @@ type fakeClient struct {
 	networkDisconnectFn func(*fakeCall, context.Context, string, string, bool) error
 	containerStopFn     func(*fakeCall, context.Context, string, *time.Duration) error
 	containerRemoveFn   func(*fakeCall, context.Context, string, types.ContainerRemoveOptions) error
+	eventsFn            func(context.Context, types.EventsOptions) (<-chan events.Message, <-chan error)
 }
 
 func (c *fakeClient) findFakeCall(fn fakeFn) *fakeCall {
@@ -208,6 +210,7 @@ func TestRunExporter(t *testing.T) {
 				Image:        "oliver006/redis_exporter:latest",
 				Cmd:          []string{"-redis.addr=redis://localhost:6379"},
 				EnvVars:      []string{"FOO=BAR"},
+				Port:         "9121",
 				ExportedTask: models.TaskToExport{
 					ID:     "012dfc9",
 					Name:   "task-to-export",
@@ -241,12 +244,13 @@ func TestCancelRunExporter(t *testing.T) {
 		},
 	}
 	exporter := models.Exporter{
-		Name:           "exporter004",
+		Name:         "exporter004",
 		ExporterType: "redis",
-		Image:          "oliver006/redis_exporter:latest",
-		Cmd:            []string{"-redis.addr=redis://localhost:6379"},
-		EnvVars:        []string{"FOO=BAR"},
-		ExportedTask:   models.TaskToExport{
+		Image:        "oliver006/redis_exporter:latest",
+		Cmd:          []string{"-redis.addr=redis://localhost:6379"},
+		EnvVars:      []string{"FOO=BAR"},
+		Port:         "9121",
+		ExportedTask: models.TaskToExport{
 			ID:     "012dfc9",
 			Name:   "task-to-export",
 			Labels: map[string]string{},
@@ -629,13 +633,15 @@ func TestFindMissingExporters(t *testing.T) {
 		findMatchingExportersFn: func(t models.TaskToExport) map[string]models.Exporter {
 			name := "type"
 			image := "some/image"
+			port := "8080"
 
 			if t.Name == "/redis" {
 				name = "redis"
 				image = "oliver006/redis_exporter:v0.25.0"
+				port = "9121"
 			}
 
-			exporter, _ := models.NewExporter(name, name, image, []string{}, []string{}, t)
+			exporter, _ := models.NewExporter(name, name, image, []string{}, []string{}, port, t)
 
 			return map[string]models.Exporter{
 				name: exporter,
@@ -654,6 +660,7 @@ func TestFindMissingExporters(t *testing.T) {
 			Image:        "oliver006/redis_exporter:v0.25.0",
 			Cmd:          []string{},
 			EnvVars:      []string{},
+			Port:         "9121",
 			ExportedTask: models.TaskToExport{
 				ID:   "exported-task002-cid",
 				Name: "/redis",

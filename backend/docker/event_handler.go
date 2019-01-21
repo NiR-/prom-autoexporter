@@ -1,12 +1,7 @@
 package docker
 
-/* import (
-	"bufio"
-	"bytes"
+import (
 	"context"
-	"fmt"
-	"html/template"
-	"sync"
 	"time"
 
 	"github.com/NiR-/prom-autoexporter/log"
@@ -14,12 +9,10 @@ package docker
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/client"
-	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
-func (b DockerBackend) ListenForTasksToExport(ctx context.Context) {
+func (b DockerBackend) ListenForTasksToExport(ctx context.Context, evtCh chan<- models.TaskEvent) {
 	dockEvtCh, dockErrCh := b.cli.Events(ctx, types.EventsOptions{
 		Since: time.Now().Format(time.RFC3339),
 		Filters: filters.NewArgs(
@@ -30,6 +23,8 @@ func (b DockerBackend) ListenForTasksToExport(ctx context.Context) {
 
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case err := <-dockErrCh:
 			panic(err)
 		case evt := <-dockEvtCh:
@@ -38,9 +33,15 @@ func (b DockerBackend) ListenForTasksToExport(ctx context.Context) {
 				continue
 			}
 
+			evtType := models.TaskStarted
+
 			// Ignore actions not filtered by docker daemon
+			// @TODO: check no actions missing
 			if evt.Action != "start" && evt.Action != "die" {
 				continue
+			}
+			if evt.Action == "die" {
+				evtType = models.TaskStopped
 			}
 
 			logger := log.GetLogger(ctx).WithFields(logrus.Fields{
@@ -49,114 +50,29 @@ func (b DockerBackend) ListenForTasksToExport(ctx context.Context) {
 				"exported.cid": evt.Actor.ID,
 			})
 			ctx = log.WithLogger(ctx, logger)
-
 			logger.Debug("New container event received.")
 
-			if evt.Action == "start" {
-				cancellables.add(evt.Actor.ID, ctx)
-			} else if evt.Action == "die" {
-				if cancelled := cancellables.cancel(evt.Actor.ID); cancelled {
-					logger.Debug("Set up process was running and has been cancelled.")
-				}
-			}
+			taskId := evt.Actor.ID
+			taskName := evt.Actor.Attributes["name"]
+			labels := extractActorLabels(evt.Actor)
 
-			go func(ctx context.Context, evt events.Message) {
-				switch evt.Action {
-				case "start":
-					return b.handleContainerStart(ctx, evt.Actor.ID)
-				case "die":
-					return b.handleContainerStop(ctx, evt.Actor.ID)
-				default:
-					return fmt.Errorf("Action %q for %s %q is not supported.", evt.Action, evt.Type, evt.Actor.ID)
-				}
-			}(ctx, evt)
+			t := models.TaskToExport{taskId, taskName, labels}
+			exporters := b.resolveExporters(ctx, t)
+
+			evtCh <-models.TaskEvent{t, evtType, exporters}
 		}
 	}
 }
 
-func (b DockerBackend) handleContainerStart(ctx context.Context, containerId, promNetwork string) error {
-	logger := log.GetLogger(ctx)
-	container, err := b.cli.ContainerInspect(ctx, containerId)
+func extractActorLabels(actor events.Actor) map[string]string {
+	labels := make(map[string]string)
 
-	if client.IsErrNotFound(err) {
-		logger.Info("Container to export died prematurly...")
-		return nil
-	} else if err != nil {
-		return errors.WithStack(err)
+	for k, v := range actor.Attributes {
+		if k == "name" || k == "image" || k == "exitCode" {
+			continue
+		}
+		labels[k] = v
 	}
 
-	// We first check if an exporter name has been explicitly provided
-	exporterType, err := readLabel(container, LABEL_EXPORTER_NAME)
-	if err != nil {
-		return err
-	}
-
-	// Then we try to find a predefined exporter matching container metadata
-	if exporterType == "" {
-		exporterType = models.FindMatchingExporter(container.Name)
-	}
-
-	logger = logger.WithFields(logrus.Fields{
-		"exported.name": container.Name,
-	})
-	ctx = log.WithLogger(ctx, logger)
-
-	// At this point, if no exporter has been found, we abort start up process
-	if exporterType == "" {
-		logger.Debug("No exporter name provided and no matching exporter found.")
-
-		return nil
-	}
-
-	exporterName := getExporterName(container.Name)
-	exporter, err := models.FromPredefinedExporter(exporterName, exporterType, container)
-	if models.IsErrPredefinedExporterNotFound(err) {
-		logger.Warnf("No predefined exporter named %q found.", exporterType)
-		return nil
-	} else if err != nil {
-		return err
-	}
-
-	logger.WithFields(logrus.Fields{
-		"exporter.image": exporter.Image,
-	}).Info("Starting exporter...")
-
-	b.RunExporter(ctx, exporter)
-
-	return nil
+	return labels
 }
-
-func readLabel(container types.ContainerJSON, label string) (string, error) {
-	return renderTpl(container.Config.Labels[label], container)
-}
-
-func renderTpl(tplStr string, values interface{}) (string, error) {
-	tpl, err := template.New("").Parse(tplStr)
-	if err != nil {
-		return "", errors.WithStack(err)
-	}
-
-	var buf bytes.Buffer
-	writer := bufio.NewWriter(&buf)
-	err = tpl.Execute(writer, values)
-	if err != nil {
-		return "", errors.WithStack(err)
-	}
-
-	writer.Flush()
-	val := buf.String()
-
-	return val, nil
-}
-
-func (b DockerBackend) handleContainerStop(ctx context.Context, containerId string) error {
-	exporter, found, err := b.FindAssociatedExporter(ctx, containerId)
-
-	if err != nil {
-		return err
-	} else if !found {
-		return nil
-	}
-
-	return b.CleanupExporter(ctx, exporter.ID, true)
-} */

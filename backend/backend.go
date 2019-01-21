@@ -9,31 +9,11 @@ import (
 
 type Backend interface{
 	RunExporter(context.Context, models.Exporter) error
-	FindMissingExporters(context.Context) []models.Exporter
+	FindMissingExporters(context.Context) ([]models.Exporter, error)
 	CleanupExporters(context.Context, bool) error
 	CleanupExporter(context.Context, string, bool) error
 	GetPromStaticConfig(context.Context) (*models.StaticConfig, error)
-	ListenForTasksToExport(context.Context) (chan models.Exporter, chan error)
-}
-
-type Event interface{
-	Exporter() models.Exporter
-}
-
-type TaskToExportStarted struct {
-	exporter models.Exporter
-}
-
-func (evt TaskToExportStarted) Exporter() models.Exporter {
-	return evt.exporter
-}
-
-type TaskToExportStopped struct {
-	exporter models.Exporter
-}
-
-func (evt TaskToExportStopped) Exporter() models.Exporter {
-	return evt.exporter
+	ListenForTasksToExport(context.Context, chan<- models.TaskEvent)
 }
 
 type errTaskToExportNotFound struct{

@@ -64,13 +64,13 @@ func (b DockerBackend) RunExporter(ctx context.Context, exporter models.Exporter
 		case <-ctx.Done():
 			return nil
 		default:
-			logFields := logrus.Fields{"step": p.step}
+			logger = logger.WithField("step", p.step)
 			if p.exporterCID != "" {
-				logFields["exporter.cid"] = p.exporterCID
+				logger = logger.WithField("exporter.cid", p.exporterCID)
 			}
 
-			logger = logger.WithFields(logFields)
 			ctx = log.WithLogger(ctx, logger)
+			exporter := p.exporter
 
 			// The startup process is decomposed into several steps executed serially,
 			// in order to cancel the startup as soon as possible
@@ -80,17 +80,18 @@ func (b DockerBackend) RunExporter(ctx context.Context, exporter models.Exporter
 				p.step = stepCreate
 			case stepCreate:
 				var cid string
-				cid, err = b.createContainer(ctx, p.exporter)
+				cid, err = b.createContainer(ctx, exporter)
 
 				p.exporterCID = cid
 				p.step = stepConnect
 			case stepConnect:
-				err = b.connectToNetwork(ctx, p.exporter, p.exporterCID)
+				err = b.connectToNetwork(ctx, exporter.ExportedTask.ID)
 				p.step = stepStart
 			case stepStart:
-				err = b.startContainer(ctx, p.exporter, p.exporterCID)
+				err = b.startContainer(ctx, exporter, p.exporterCID)
 				p.step = stepFinished
 			case stepFinished:
+				logger.Info("Exporter %q started.", exporter.Name)
 				return nil
 			default:
 				err = errors.New(fmt.Sprintf("undefined step %s", p.step))
@@ -166,7 +167,7 @@ func (b DockerBackend) createContainer(ctx context.Context, exporter models.Expo
 	return container.ID, nil
 }
 
-func (b DockerBackend) connectToNetwork(ctx context.Context, exporter models.Exporter, cid string) error {
+func (b DockerBackend) connectToNetwork(ctx context.Context, cid string) error {
 	endpointSettings := network.EndpointSettings{}
 	err := b.cli.NetworkConnect(ctx, b.promNetwork, cid, &endpointSettings)
 
@@ -243,7 +244,7 @@ func (b DockerBackend) resolveExporters(ctx context.Context, t models.TaskToExpo
 	matching, errors := b.finder.FindMatchingExporters(t)
 
 	logger := log.GetLogger(ctx)
-	logger.Infof("Resolved %d exporters for %q.", len(matching), t.Name)
+	logger.Debugf("Resolved %d exporters for %q.", len(matching), t.Name)
 
 	for _, err := range errors {
 		logger.Warning(err)
@@ -277,21 +278,19 @@ func (b DockerBackend) CleanupExporters(ctx context.Context, force bool) error {
 	}
 
 	logger := log.GetLogger(ctx)
-	logger.Debugf("Found %d running exporters.", len(exporters))
+	logger.Debugf("Found %d exporters.", len(exporters))
 
-	failed := []string{}
 	for _, exporter := range exporters {
 		err := b.stopExporter(ctx, exporter, force)
-		if err != nil && !IsErrExportedTaskStillRunning(err) {
+
+		if err == nil {
+			continue
+		}
+		if !IsErrExportedTaskStillRunning(err) {
 			return err
 		}
-		if err != nil && IsErrExportedTaskStillRunning(err) {
-			failed = append(failed, exporter.Names[0])
-		}
-	}
 
-	if len(failed) > 0 {
-		return errors.New(fmt.Sprintf("failed to cleanup %s", strings.Join(failed, ", ")))
+		logger.Infof("Exporter %q can't be cleaned up, exported task still running.", exporter.Names[0])
 	}
 
 	return nil
@@ -299,6 +298,7 @@ func (b DockerBackend) CleanupExporters(ctx context.Context, force bool) error {
 
 func (b DockerBackend) CleanupExporter(ctx context.Context, exporterName string, force bool) error {
 	c, err := b.cli.ContainerList(ctx, types.ContainerListOptions{
+		All:     true,
 		Filters: filters.NewArgs(
 			filters.Arg("name", exporterName),
 		),
@@ -321,18 +321,21 @@ func (b DockerBackend) stopExporter(ctx context.Context, exporter types.Containe
 	exportedCID := exporter.Labels[LABEL_EXPORTED_ID]
 
 	exported, err := b.cli.ContainerInspect(ctx, exportedCID)
+	// @TODO: check what happens if the exported container has already been removed
 	if err != nil && !client.IsErrNotFound(err) {
 		return errors.WithStack(err)
 	} else if err == nil && exported.State.Running && !force {
 		return newErrExportedTaskStillRunning(exporter.ID, exportedCID)
 	}
 
-	err = b.cli.NetworkDisconnect(ctx, b.promNetwork, exporterCID, force)
-	if err != nil {
+	// @TODO: find a way to disconnect the exported container only when no more exporter is attached to it (check how many containers share the same net cgroup?)
+	/* err = b.cli.NetworkDisconnect(ctx, b.promNetwork, exporterCID, force)
+	if err != nil && !strings.Contains(err.Error(), "is not connected to the network") {
 		return errors.WithStack(err)
-	}
+	} */
 
 	// @TODO: add a timeout?
+	// @TODO: what happens if the exporter has already been stopped but not removed?
 	err = b.cli.ContainerStop(ctx, exporterCID, nil)
 	if err != nil {
 		return errors.WithStack(err)
@@ -350,11 +353,15 @@ func (b DockerBackend) stopExporter(ctx context.Context, exporter types.Containe
 		"exported.id":   exportedCID,
 		"exported.name": exporter.Labels[LABEL_EXPORTED_NAME],
 	})
-	logger.Info("Exporter container stopped.")
+	logger.Info("Exporter container stopped and removed.")
 
 	return nil
 }
 
 func getExporterName(exporterType, tname string) string {
 	return fmt.Sprintf("/exporter.%s.%s", exporterType, strings.TrimLeft(tname, "/"))
+}
+
+func (b DockerBackend) GetPromStaticConfig(context.Context) (*models.StaticConfig, error) {
+	panic(errors.New("not implemented yet."))
 }
