@@ -18,6 +18,7 @@ import (
 	"github.com/docker/docker/api/types/events"
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/strslice"
+	"github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/client"
 	"gotest.tools/assert"
 )
@@ -34,6 +35,9 @@ const (
 	containerRemoveFn
 	networkConnectFn
 	networkDisconnectFn
+	networkInspectFn
+	taskListFn
+	serviceInspectFn
 	eventsFn
 )
 
@@ -59,6 +63,10 @@ type fakeClient struct {
 
 	networkConnectFn    func(*fakeCall, context.Context, string, string, *network.EndpointSettings) error
 	networkDisconnectFn func(*fakeCall, context.Context, string, string, bool) error
+	networkInspectFn    func(*fakeCall, context.Context, string, types.NetworkInspectOptions) (types.NetworkResource, error)
+
+	taskListFn       func(*fakeCall, context.Context, types.TaskListOptions) ([]swarm.Task, error)
+	serviceInspectFn func(*fakeCall, context.Context, string, types.ServiceInspectOptions) (swarm.Service, []byte, error)
 
 	eventsFn func(*fakeCall, context.Context, types.EventsOptions) (<-chan events.Message, <-chan error)
 }
@@ -147,6 +155,31 @@ func (c *fakeClient) ContainerRemove(ctx context.Context, containerID string, op
 		return c.containerRemoveFn(fc, ctx, containerID, opts)
 	}
 	return nil
+}
+
+func (c *fakeClient) NetworkInspect(ctx context.Context, networkID string, opts types.NetworkInspectOptions) (types.NetworkResource, error) {
+	if c.networkInspectFn != nil {
+		fc := c.findFakeCall(networkInspectFn)
+		return c.networkInspectFn(fc, ctx, networkID, opts)
+	}
+	return types.NetworkResource{}, nil
+}
+
+func (c *fakeClient) TaskList(ctx context.Context, opts types.TaskListOptions) ([]swarm.Task, error) {
+	if c.taskListFn != nil {
+		fc := c.findFakeCall(taskListFn)
+		return c.taskListFn(fc, ctx, opts)
+	}
+	return []swarm.Task{}, nil
+}
+
+func (c *fakeClient) ServiceInspectWithRaw(ctx context.Context, serviceID string, opts types.ServiceInspectOptions) (swarm.Service, []byte, error) {
+	if c.serviceInspectFn != nil {
+		fc := c.findFakeCall(serviceInspectFn)
+		fc.callsCounter++
+		return c.serviceInspectFn(fc, ctx, serviceID, opts)
+	}
+	return swarm.Service{}, []byte{}, nil
 }
 
 func (c *fakeClient) Events(ctx context.Context, opts types.EventsOptions) (<-chan events.Message, <-chan error) {

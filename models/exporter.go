@@ -132,14 +132,6 @@ func (p PredefinedExporter) Exporter(t TaskToExport) (Exporter, error) {
 /* func PredefinedExporterExist(predefinedExporter string) bool {
 	_, ok := predefinedExporters[predefinedExporter]
 	return ok
-}
-
-func GetExporterPort(predefinedExporter string) (string, error) {
-	if _, ok := predefinedExporters[predefinedExporter]; !ok {
-		return "", newErrPredefinedExporterNotFound(predefinedExporter)
-	}
-
-	return predefinedExporters[predefinedExporter].exporterPort, nil
 } */
 
 type Matcher func(TaskToExport) bool
@@ -162,7 +154,7 @@ var (
 			name:    "redis",
 			matcher: newRegexpNameMatcher("redis"),
 			image:   "oliver006/redis_exporter:v0.25.0",
-			cmd:     []string{
+			cmd: []string{
 				"-redis.addr=redis://localhost:6379",
 				"-redis.alias={{ index .Labels \"com.docker.swarm.service.name\" }}",
 				"-namespace={{ index .Labels \"com.docker.swarm.service.name\" }}",
@@ -174,18 +166,18 @@ var (
 			name:    "php",
 			matcher: newRegexpNameMatcher("php"),
 			image:   "bakins/php-fpm-exporter:v0.5.0",
-			cmd:     []string{
+			cmd: []string{
 				"--addr", ":8080",
 				"--fastcgi", "tcp://localhost:9000/_fpm_status",
 			},
-			envVars: []string{},
+			envVars:      []string{},
 			exporterPort: "8080",
 		},
 		"elasticsearch": PredefinedExporter{
 			name:    "elasticsearch",
 			matcher: newRegexpNameMatcher("elasticsearch"),
 			image:   "justwatch/elasticsearch_exporter:1.0.4rc1",
-			cmd:     []string{
+			cmd: []string{
 				"-es.uri=http://localhost:9200",
 				"-es.all=false",
 			},
@@ -196,7 +188,7 @@ var (
 			name:    "fluentd",
 			matcher: newRegexpNameMatcher("fluentd?"),
 			image:   "bitnami/fluentd-exporter:0.2.0",
-			cmd:     []string{
+			cmd: []string{
 				"-scrape_uri", "http://localhost:24220/api/plugins.json",
 			},
 			envVars:      []string{},
@@ -206,7 +198,7 @@ var (
 			name:    "nginx",
 			matcher: newRegexpNameMatcher("nginx"),
 			image:   "nginx/nginx-prometheus-exporter:0.2.0",
-			cmd:     []string{
+			cmd: []string{
 				"-nginx.scrape-uri", "http://localhost/_status",
 			},
 			envVars:      []string{},
