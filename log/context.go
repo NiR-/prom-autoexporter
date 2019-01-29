@@ -19,11 +19,11 @@ var (
 )
 
 func WithLogger(ctx context.Context, logger *logrus.Entry) context.Context {
-	return context.WithValue(ctx, "logger", logger)
+	return context.WithValue(ctx, loggerKey, logger)
 }
 
 func WithDefaultLogger(ctx context.Context) context.Context {
-	return context.WithValue(ctx, "logger", defaultLogger)
+	return context.WithValue(ctx, loggerKey, defaultLogger)
 }
 
 func GetLogger(ctx context.Context) *logrus.Entry {

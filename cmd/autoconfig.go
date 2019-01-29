@@ -7,6 +7,7 @@ import (
 
 	"github.com/NiR-/prom-autoexporter/backend"
 	"github.com/NiR-/prom-autoexporter/log"
+	"github.com/NiR-/prom-autoexporter/models"
 	"github.com/docker/docker/client"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -14,6 +15,7 @@ import (
 )
 
 func AutoConfig(c *cli.Context) {
+	// @TODO: validate promNetwork isn't empty / interval default value
 	promNetwork := c.String("network")
 	interval := c.Duration("interval")
 	filepath := c.String("filepath")
@@ -30,45 +32,40 @@ func AutoConfig(c *cli.Context) {
 	defer cli.Close()
 	cli.NegotiateAPIVersion(ctx)
 
-	b := backend.NewBackend(cli)
+	b := backend.NewSwarmBackend(cli, promNetwork, models.NewPredefinedExporterFinder())
+	go reconfigurePrometheus(ctx, b, filepath)
+
 	t := time.NewTicker(interval)
-
-	reconfigure := func() {
-		if err := reconfigurePrometheus(ctx, b, promNetwork, filepath); err != nil {
-			logrus.Errorf("%+v", err)
-		}
-	}
-
-	go reconfigure()
-
 	for {
 		select {
 		case _ = <-t.C:
-			reconfigure()
+			reconfigurePrometheus(ctx, b, filepath)
 		}
 	}
 }
 
-func reconfigurePrometheus(ctx context.Context, b backend.Backend, promNetwork string, filepath string) error {
-	logrus.Info("Reconfiguring prometheus...")
+func reconfigurePrometheus(ctx context.Context, b backend.Backend, filepath string) {
+	logger := log.GetLogger(ctx)
+	logger.Info("Reconfiguring prometheus...")
 
-	staticConfig, err := b.GetPromStaticConfig(ctx, promNetwork)
+	staticConfig, err := b.GetPromStaticConfig(ctx)
 	if err != nil {
-		return err
+		logger.Error(err)
+		return
 	}
 
 	f, err := os.OpenFile(filepath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
-		return err
+		logger.Error(err)
+		return
 	}
 	defer f.Close()
 
 	configfile, err := staticConfig.ToJSON()
 	if err != nil {
-		return err
+		logger.Error(err)
+		return
 	}
 
 	f.Write(configfile)
-
-	return nil
 }

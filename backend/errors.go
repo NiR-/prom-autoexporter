@@ -15,7 +15,7 @@ func (e errExportedStilRunning) Error() string {
 	return fmt.Sprintf("Exporter %q can't be stopped, exported container %q still running.", e.exporterID, e.exportedID)
 }
 
-func IsErrExportedStillRunning(e error) bool {
+func IsErrExportedTaskStillRunning(e error) bool {
 	_, ok := e.(errExportedStilRunning)
 	return ok
 }
